@@ -1,0 +1,29 @@
+cases:
+  - name: gap_hi_0.03_lo_-0.01
+    strategy: dragon_leader
+    params:
+      entry_gate: pass
+      entry_model: next_open
+      max_next_open_gap: 0.03
+      min_next_open_gap: -0.01
+  - name: gap_hi_0.05_lo_-0.03
+    strategy: dragon_leader
+    params:
+      entry_gate: pass
+      entry_model: next_open
+      max_next_open_gap: 0.05
+      min_next_open_gap: -0.03
+  - name: gap_hi_0.07_lo_-0.03
+    strategy: dragon_leader
+    params:
+      entry_gate: pass
+      entry_model: next_open
+      max_next_open_gap: 0.07
+      min_next_open_gap: -0.03
+  - name: gap_hi_0.10_lo_-0.05
+    strategy: dragon_leader
+    params:
+      entry_gate: pass
+      entry_model: next_open
+      max_next_open_gap: 0.10
+      min_next_open_gap: -0.05

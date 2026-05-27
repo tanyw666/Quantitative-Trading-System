@@ -1,0 +1,16 @@
+name: configurable_strong_stock
+description: 配置化强势股筛选样例
+condition:
+  all:
+    - field: momentum_20
+      op: gte
+      value: 0.12
+    - field: volume_ratio_20
+      op: gte
+      value: 1.5
+    - field: atr_pct_14
+      op: lte
+      value: 0.12
+    - field: close
+      op: gte
+      field_right: ma20

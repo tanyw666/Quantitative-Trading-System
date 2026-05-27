@@ -1,0 +1,7 @@
+name: strong_stock_screen
+description: 强势股筛选样例，面向短线候选池
+params:
+  lookback: 20
+  min_20d_return: 0.12
+  min_volume_ratio: 1.5
+  max_atr_pct: 0.12

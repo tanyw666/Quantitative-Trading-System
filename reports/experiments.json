@@ -1,0 +1,107 @@
+[
+  {
+    "name": "conservative",
+    "strategy": "strong_stock_screen",
+    "params": {
+      "min_20d_return": 0.18,
+      "min_volume_ratio": 1.8,
+      "max_atr_pct": 0.08
+    },
+    "scoring_weights": {
+      "momentum_20": 0.45,
+      "volume_ratio_20": 0.25,
+      "atr_pct_14": 0.3
+    },
+    "selection_count": 2,
+    "summary": [
+      {
+        "horizon": 1,
+        "count": 1,
+        "mean_return": 0.02941176470588225,
+        "win_rate": 1.0
+      },
+      {
+        "horizon": 3,
+        "count": 1,
+        "mean_return": 0.08823529411764697,
+        "win_rate": 1.0
+      },
+      {
+        "horizon": 5,
+        "count": 1,
+        "mean_return": 0.11764705882352944,
+        "win_rate": 1.0
+      }
+    ]
+  },
+  {
+    "name": "balanced",
+    "strategy": "strong_stock_screen",
+    "params": {
+      "min_20d_return": 0.12,
+      "min_volume_ratio": 1.5,
+      "max_atr_pct": 0.12
+    },
+    "scoring_weights": {
+      "momentum_20": 0.5,
+      "volume_ratio_20": 0.3,
+      "atr_pct_14": 0.2
+    },
+    "selection_count": 4,
+    "summary": [
+      {
+        "horizon": 1,
+        "count": 3,
+        "mean_return": 0.028586990351696134,
+        "win_rate": 1.0
+      },
+      {
+        "horizon": 3,
+        "count": 3,
+        "mean_return": 0.05745409274821034,
+        "win_rate": 1.0
+      },
+      {
+        "horizon": 5,
+        "count": 1,
+        "mean_return": 0.11764705882352944,
+        "win_rate": 1.0
+      }
+    ]
+  },
+  {
+    "name": "aggressive",
+    "strategy": "strong_stock_screen",
+    "params": {
+      "min_20d_return": 0.08,
+      "min_volume_ratio": 1.2,
+      "max_atr_pct": 0.16
+    },
+    "scoring_weights": {
+      "momentum_20": 0.6,
+      "volume_ratio_20": 0.3,
+      "atr_pct_14": 0.1
+    },
+    "selection_count": 6,
+    "summary": [
+      {
+        "horizon": 1,
+        "count": 5,
+        "mean_return": 0.0228578999167234,
+        "win_rate": 0.8
+      },
+      {
+        "horizon": 3,
+        "count": 3,
+        "mean_return": 0.05745409274821034,
+        "win_rate": 1.0
+      },
+      {
+        "horizon": 5,
+        "count": 1,
+        "mean_return": 0.11764705882352944,
+        "win_rate": 1.0
+      }
+    ]
+  }
+]

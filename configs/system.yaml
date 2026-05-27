@@ -1,0 +1,32 @@
+market: A股
+base_currency: CNY
+data:
+  primary_source: csv
+  cache_dir: data/cache
+backtest:
+  initial_cash: 100000
+  commission_rate: 0.0003
+  slippage_rate: 0.0005
+  max_position_pct: 0.2
+  stop_loss_pct: 0.08
+reports:
+  output_dir: reports
+scoring:
+  weights:
+    momentum_20: 0.50
+    volume_ratio_20: 0.30
+    atr_pct_14: 0.20
+    sector_strength_score: 0.15
+risk:
+  regime_exposure:
+    hot: 0.80
+    warm: 0.60
+    neutral: 0.30
+    cold: 0.10
+    frozen: 0.0
+    empty: 0.0
+  cap_by_risk:
+    low: 0.20
+    medium: 0.12
+    high: 0.06
+    unknown: 0.05

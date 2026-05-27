@@ -1,0 +1,31 @@
+cases:
+  - name: conservative
+    strategy: strong_stock_screen
+    params:
+      min_20d_return: 0.18
+      min_volume_ratio: 1.8
+      max_atr_pct: 0.08
+    scoring_weights:
+      momentum_20: 0.45
+      volume_ratio_20: 0.25
+      atr_pct_14: 0.30
+  - name: balanced
+    strategy: strong_stock_screen
+    params:
+      min_20d_return: 0.12
+      min_volume_ratio: 1.5
+      max_atr_pct: 0.12
+    scoring_weights:
+      momentum_20: 0.50
+      volume_ratio_20: 0.30
+      atr_pct_14: 0.20
+  - name: aggressive
+    strategy: strong_stock_screen
+    params:
+      min_20d_return: 0.08
+      min_volume_ratio: 1.2
+      max_atr_pct: 0.16
+    scoring_weights:
+      momentum_20: 0.60
+      volume_ratio_20: 0.30
+      atr_pct_14: 0.10
