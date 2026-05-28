@@ -35,7 +35,7 @@ from quant_system.reports.briefing import BriefingInput, BriefingReport
 from quant_system.portfolio.selection_tracker import SelectionRecord, SelectionTracker
 from quant_system.reports.daily import DailyReport, DailyReportInput
 from quant_system.reports.dragon import DragonValidationInput, DragonValidationReport
-from quant_system.reports.experiments import ExperimentReport
+from quant_system.reports.experiments import ExperimentReport, build_experiment_summary_payload
 from quant_system.reports.weekly import WeeklyReport, WeeklyReportInput
 from quant_system.risk.pretrade import run_pretrade_check
 from quant_system.risk.sizing import build_allocation_plan
@@ -108,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--strategy", default="strong_stock_screen")
     weekly.add_argument("--config", type=Path, help="YAML 条件树策略配置")
     weekly.add_argument("--settings", type=Path, help="系统设置 YAML，覆盖评分和仓位规则")
+    weekly.add_argument("--experiment-summary", type=Path, help="策略实验摘要 JSON，来自 optimize experiments --summary-output")
     weekly.add_argument("--note", action="append", default=[], help="下周改进事项，可重复传入")
 
     briefing = report_sub.add_parser("briefing", help="生成盘前/盘中作战简报")
@@ -274,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiments.add_argument("--recommend-min-count", type=int, default=5, help="报告给出推荐所需的最小样本数")
     experiments.add_argument("--output", type=Path, help="可选：保存 JSON 实验结果")
     experiments.add_argument("--report-output", type=Path, help="可选：保存 Markdown 实验报告")
+    experiments.add_argument("--summary-output", type=Path, help="可选：保存结构化推荐摘要 JSON")
 
     return parser
 
@@ -485,6 +487,9 @@ def run_weekly_report(args: argparse.Namespace) -> None:
         gate_summary = summarize_forward_returns_by(validation, "entry_gate").to_dict(orient="records")
 
     trade_stats = summarize_trade_journal(TradeJournal(args.journal).list())
+    experiment_summary = None
+    if args.experiment_summary and args.experiment_summary.exists():
+        experiment_summary = json.loads(args.experiment_summary.read_text(encoding="utf-8"))
     content = WeeklyReport().render(
         WeeklyReportInput(
             title="A股量化周报",
@@ -492,6 +497,7 @@ def run_weekly_report(args: argparse.Namespace) -> None:
             selection_summary=selection_summary,
             gate_summary=gate_summary,
             trade_stats=trade_stats,
+            experiment_summary=experiment_summary,
             notes=args.note,
         )
     )
@@ -948,6 +954,18 @@ def run_optimize_experiments(args: argparse.Namespace) -> None:
             encoding="utf-8",
         )
         print(str(args.report_output))
+    if args.summary_output:
+        args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+        summary_payload = build_experiment_summary_payload(
+            payload,
+            preferred_horizon=args.recommend_horizon,
+            min_count=args.recommend_min_count,
+        )
+        args.summary_output.write_text(
+            json.dumps(summary_payload, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        print(str(args.summary_output))
 
 
 def main() -> None:

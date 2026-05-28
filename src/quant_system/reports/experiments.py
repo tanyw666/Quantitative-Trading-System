@@ -1,18 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 
 
 @dataclass(frozen=True)
 class ExperimentRecommendation:
     name: str
+    strategy: str
+    params: dict
+    scoring_weights: dict
     horizon: int
     mean_return: float
     win_rate: float
     count: int
     score: float
     reason: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 class ExperimentReport:
@@ -35,9 +41,12 @@ class ExperimentReport:
             "",
         ]
         if recommendation:
+            params = ", ".join(f"{key}={value}" for key, value in recommendation.params.items()) or "无"
             lines.extend(
                 [
                     f"- 推荐参数组：{recommendation.name}",
+                    f"- 策略：{recommendation.strategy}",
+                    f"- 参数：{params}",
                     f"- 参考周期：{recommendation.horizon}日",
                     f"- 平均收益：{recommendation.mean_return:.2%}",
                     f"- 胜率：{recommendation.win_rate:.1%}",
@@ -89,6 +98,9 @@ def recommend_experiment(
             candidates.append(
                 {
                     "name": result.get("name", ""),
+                    "strategy": result.get("strategy", ""),
+                    "params": dict(result.get("params", {})),
+                    "scoring_weights": dict(result.get("scoring_weights", {})),
                     "horizon": int(row.get("horizon", 0)),
                     "mean_return": float(row.get("mean_return", 0)),
                     "win_rate": float(row.get("win_rate", 0)),
@@ -118,6 +130,9 @@ def recommend_experiment(
     )[0]
     return ExperimentRecommendation(
         name=str(best["name"]),
+        strategy=str(best["strategy"]),
+        params=dict(best["params"]),
+        scoring_weights=dict(best["scoring_weights"]),
         horizon=int(best["horizon"]),
         mean_return=float(best["mean_return"]),
         win_rate=float(best["win_rate"]),
@@ -125,3 +140,22 @@ def recommend_experiment(
         score=robust_score(best),
         reason=f"按{target_horizon}日周期筛选，样本数不少于{min_count}，综合平均收益、胜率和样本规模排序。",
     )
+
+
+def build_experiment_summary_payload(
+    results: list[dict],
+    preferred_horizon: int = 3,
+    min_count: int = 5,
+) -> dict:
+    recommendation = recommend_experiment(
+        results,
+        preferred_horizon=preferred_horizon,
+        min_count=min_count,
+    )
+    return {
+        "generated_at": date.today().isoformat(),
+        "preferred_horizon": preferred_horizon,
+        "min_count": min_count,
+        "recommendation": recommendation.to_dict() if recommendation else None,
+        "result_count": len(results),
+    }

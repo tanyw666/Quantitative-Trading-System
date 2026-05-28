@@ -97,6 +97,12 @@ By default the report only recommends a parameter set when the preferred horizon
 python -m quant_system optimize experiments --csv data/sample_dragon_next_open_ohlcv.csv --preset dragon_next_open_gap --horizons 1 --top 1 --min-history 25 --recommend-horizon 1 --recommend-min-count 1 --report-output reports/dragon_gap_experiments_relaxed.md
 ```
 
+To make the recommendation machine-readable for later weekly reports or automation, add `--summary-output`:
+
+```powershell
+python -m quant_system optimize experiments --csv data/sample_dragon_next_open_ohlcv.csv --preset dragon_next_open_gap --horizons 1 --top 1 --min-history 25 --recommend-horizon 1 --recommend-min-count 1 --summary-output reports/dragon_gap_experiment_summary.json
+```
+
 ## Dragon Tags
 
 - `reseal-candidate`: daily bars suggest the stock touched limit-up, traded below the limit price, and still closed at limit-up. This is a conservative daily-bar proxy, not order-book proof.
