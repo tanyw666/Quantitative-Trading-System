@@ -24,13 +24,38 @@ def test_briefing_report_renders_core_sections():
                     "score": 0.05,
                 },
             },
+            promotion_summary={
+                "total": 1,
+                "ok_count": 1,
+                "failed_count": 0,
+                "backtest_count": 1,
+                "latest_created_at": "2026-05-28T09:00:55+00:00",
+                "best_backtest": {
+                    "output": "configs/strategies/promoted.yaml",
+                    "total_return": 0.05,
+                    "sharpe": 1.2,
+                    "trades": 3,
+                },
+                "records": [
+                    {
+                        "created_at": "2026-05-28T09:00:55+00:00",
+                        "output": "configs/strategies/promoted.yaml",
+                        "ok": True,
+                        "total_return": 0.05,
+                        "sharpe": 1.2,
+                    }
+                ],
+            },
         )
     )
 
     assert "市场温度" in content
+    assert "今日策略总览" in content
     assert "今日候选" in content
     assert "主线板块" in content
     assert "策略参数参考" in content
+    assert "策略优先级" in content
+    assert "策略晋升" in content
     assert "gap_hi_0.03_lo_-0.01" in content
     assert "平均收益：2.00%" in content
     assert "今日动作" in content
@@ -46,10 +71,12 @@ def test_briefing_report_renders_empty_experiment_summary():
             position_book={"total_market_value": 0, "total_unrealized_pnl": 0, "total_exposure_pct": 0, "positions": []},
             holding_risk={"status": "pass", "checks": []},
             experiment_summary={"preferred_horizon": 3, "min_count": 5, "result_count": 1, "recommendation": None},
+            promotion_summary={"total": 0},
         )
     )
 
     assert "暂无满足门槛的推荐参数组" in content
+    assert "暂无可优先观察的策略" in content
 
 
 def test_action_notes_prioritizes_blocking_risk():

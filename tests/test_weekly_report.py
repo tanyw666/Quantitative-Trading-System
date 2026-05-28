@@ -58,10 +58,12 @@ def test_weekly_report_renders_selection_and_trade_stats():
     )
 
     assert "市场温度" in content
+    assert "今日策略总览" in content
     assert "3日" in content
     assert "按进场闸门" in content
     assert "策略实验" in content
     assert "策略晋升" in content
+    assert "统一摘要" in content
     assert "promoted.yaml" in content
     assert "balanced" in content
     assert "min_20d_return=0.12" in content

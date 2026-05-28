@@ -43,3 +43,69 @@ def render_promotion_summary_lines(summary: dict | None) -> list[str]:
                 f"{sharpe_text} |"
             )
     return lines
+
+
+def render_promotion_priority_lines(
+    experiment_summary: dict | None,
+    promotion_summary: dict | None,
+) -> list[str]:
+    lines: list[str] = []
+    recommendation = (experiment_summary or {}).get("recommendation") or {}
+    best_backtest = (promotion_summary or {}).get("best_backtest") or {}
+
+    if best_backtest:
+        lines.append(
+            f"- 优先观察：{best_backtest.get('output', '')}，"
+            f"总收益 {float(best_backtest.get('total_return', 0)):.2%}，"
+            f"Sharpe {float(best_backtest.get('sharpe', 0)):.2f}"
+        )
+    elif recommendation:
+        lines.append(
+            f"- 优先观察：{recommendation.get('strategy', '')} / {recommendation.get('name', '')}，"
+            f"参考收益 {float(recommendation.get('mean_return', 0)):.2%}，"
+            f"Sharpe {float(recommendation.get('score', 0)):.4f}"
+        )
+    else:
+        lines.append("- 暂无可优先观察的策略。")
+
+    if best_backtest and recommendation:
+        lines.append(
+            "- 对照实验推荐："
+            f"{recommendation.get('strategy', '')} / {recommendation.get('name', '')}"
+        )
+    latest = (promotion_summary or {}).get("latest_created_at")
+    if latest:
+        lines.append(f"- 最近晋升时间：{latest}")
+    return lines
+
+
+def summarize_promotion_priority(
+    experiment_summary: dict | None,
+    promotion_summary: dict | None,
+) -> dict[str, str | None]:
+    recommendation = (experiment_summary or {}).get("recommendation") or {}
+    best_backtest = (promotion_summary or {}).get("best_backtest") or {}
+    latest = (promotion_summary or {}).get("latest_created_at")
+
+    if best_backtest:
+        primary = str(best_backtest.get("output", ""))
+        reason = (
+            f"总收益 {float(best_backtest.get('total_return', 0)):.2%}，"
+            f"Sharpe {float(best_backtest.get('sharpe', 0)):.2f}"
+        )
+    elif recommendation:
+        primary = f"{recommendation.get('strategy', '')} / {recommendation.get('name', '')}"
+        reason = (
+            f"参考收益 {float(recommendation.get('mean_return', 0)):.2%}，"
+            f"score {float(recommendation.get('score', 0)):.4f}"
+        )
+    else:
+        primary = ""
+        reason = "暂无可优先观察的策略。"
+
+    return {
+        "primary": primary,
+        "reason": reason,
+        "latest_created_at": latest,
+        "recommended_case": str(recommendation.get("name", "")) if recommendation else "",
+    }

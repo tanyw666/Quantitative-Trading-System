@@ -56,9 +56,11 @@ def test_daily_report_renders_selected_metrics():
     )
 
     assert "000001 平安银行" in content
+    assert "今日优先级总览" in content
     assert "20日动量 12.00%" in content
     assert "策略参数参考" in content
     assert "策略晋升" in content
+    assert "统一摘要" in content
     assert "promoted.yaml" in content
     assert "gap_hi_0.03_lo_-0.01" in content
     assert "平均收益：2.00%" in content

@@ -135,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     briefing.add_argument("--settings", type=Path, help="系统设置 YAML，覆盖评分和仓位规则")
     briefing.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
     briefing.add_argument("--experiment-summary", type=Path, help="策略实验摘要 JSON，来自 optimize experiments --summary-output")
+    briefing.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="策略晋升历史 JSONL")
     briefing.add_argument("--cash", type=float, default=100000)
     briefing.add_argument("--top", type=int, default=5)
     add_sector_context_args(briefing)
@@ -657,6 +658,7 @@ def run_briefing_report(args: argparse.Namespace) -> None:
     experiment_summary = None
     if args.experiment_summary and args.experiment_summary.exists():
         experiment_summary = json.loads(args.experiment_summary.read_text(encoding="utf-8"))
+    promotion_summary = summarize_promotion_records(read_promotion_records(args.promotion_log), limit=10)
     content = BriefingReport().render(
         BriefingInput(
             title="A股量化作战简报",
@@ -667,6 +669,7 @@ def run_briefing_report(args: argparse.Namespace) -> None:
             holding_risk=holding_risk,
             sectors=sectors,
             experiment_summary=experiment_summary,
+            promotion_summary=promotion_summary,
         )
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

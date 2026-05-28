@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from datetime import date
 
 from quant_system.reports.experiment_summary import render_experiment_summary_lines
+from quant_system.reports.promotion_summary import (
+    render_promotion_priority_lines,
+    render_promotion_summary_lines,
+    summarize_promotion_priority,
+)
 
 
 @dataclass(frozen=True)
@@ -16,6 +21,7 @@ class BriefingInput:
     holding_risk: dict
     sectors: list[dict] | None = None
     experiment_summary: dict | None = None
+    promotion_summary: dict | None = None
 
 
 class BriefingReport:
@@ -25,9 +31,22 @@ class BriefingReport:
             "",
             f"生成日期：{date.today().isoformat()}",
             "",
-            "## 1. 市场温度",
+            "## 0. 今日策略总览",
             "",
         ]
+
+        priority = summarize_promotion_priority(data.experiment_summary, data.promotion_summary)
+        lines.extend(render_promotion_priority_lines(data.experiment_summary, data.promotion_summary))
+        if priority.get("primary"):
+            lines.append(f"- 统一摘要：{priority['primary']}")
+
+        lines.extend(
+            [
+                "",
+                "## 1. 市场温度",
+                "",
+            ]
+        )
         temp = data.market_temperature
         lines.extend(
             [
@@ -69,11 +88,16 @@ class BriefingReport:
         lines.extend(["", "## 4. 策略参数参考", ""])
         lines.extend(render_experiment_summary_lines(data.experiment_summary))
 
+        lines.extend(["", "## 5. 策略优先级", ""])
+
+        lines.extend(["", "## 6. 策略晋升", ""])
+        lines.extend(render_promotion_summary_lines(data.promotion_summary))
+
         plan = data.allocation_plan
         lines.extend(
             [
                 "",
-                "## 5. 仓位计划",
+                "## 7. 仓位计划",
                 "",
                 f"- 目标总仓位：{float(plan.get('target_exposure_pct', 0)):.1%}",
                 f"- 已分配仓位：{float(plan.get('allocated_pct', 0)):.1%}",
@@ -90,7 +114,7 @@ class BriefingReport:
         lines.extend(
             [
                 "",
-                "## 6. 当前持仓",
+                "## 8. 当前持仓",
                 "",
                 f"- 总市值：{float(book.get('total_market_value', 0)):.2f}",
                 f"- 总浮盈亏：{float(book.get('total_unrealized_pnl', 0)):.2f}",
@@ -111,11 +135,11 @@ class BriefingReport:
             lines.append("- 当前无持仓。")
 
         risk = data.holding_risk
-        lines.extend(["", "## 7. 风险检查", "", f"- 总状态：{risk.get('status', '')}"])
+        lines.extend(["", "## 9. 风险检查", "", f"- 总状态：{risk.get('status', '')}"])
         for check in risk.get("checks", []):
             lines.append(f"- [{check.get('status', '')}] {check.get('message', '')}")
 
-        lines.extend(["", "## 8. 今日动作", ""])
+        lines.extend(["", "## 10. 今日动作", ""])
         lines.extend(action_notes(temp, data.candidates, risk))
         lines.append("")
         return "\n".join(lines)

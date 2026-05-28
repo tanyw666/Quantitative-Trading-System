@@ -6,7 +6,11 @@ from datetime import date
 import pandas as pd
 
 from quant_system.reports.experiment_summary import render_experiment_summary_lines
-from quant_system.reports.promotion_summary import render_promotion_summary_lines
+from quant_system.reports.promotion_summary import (
+    render_promotion_priority_lines,
+    render_promotion_summary_lines,
+    summarize_promotion_priority,
+)
 
 
 @dataclass(frozen=True)
@@ -28,9 +32,22 @@ class WeeklyReport:
             "",
             f"生成日期：{date.today().isoformat()}",
             "",
-            "## 1. 市场环境",
+            "## 0. 今日策略总览",
             "",
         ]
+
+        priority = summarize_promotion_priority(data.experiment_summary, data.promotion_summary)
+        lines.extend(render_promotion_priority_lines(data.experiment_summary, data.promotion_summary))
+        if priority.get("primary"):
+            lines.append(f"- 统一摘要：{priority['primary']}")
+
+        lines.extend(
+            [
+                "",
+                "## 1. 市场环境",
+                "",
+            ]
+        )
 
         if data.market_temperature:
             temp = data.market_temperature
