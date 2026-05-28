@@ -30,6 +30,7 @@ def test_experiment_report_renders_markdown_table():
     assert "推荐参数组" in content
     assert "| 参数组 |" in content
     assert "balanced" in content
+    assert "至少 5 个有效样本" in content
 
 
 def test_recommend_experiment_requires_minimum_sample_count():
@@ -59,3 +60,18 @@ def test_recommend_experiment_falls_back_to_available_horizon():
 
     assert recommendation
     assert recommendation.horizon == 1
+
+
+def test_experiment_report_allows_custom_recommendation_gate():
+    content = ExperimentReport(preferred_horizon=1, min_count=1).render(
+        [
+            {
+                "name": "quick_check",
+                "params": {},
+                "summary": [{"horizon": 1, "count": 1, "mean_return": 0.02, "win_rate": 1.0}],
+            }
+        ]
+    )
+
+    assert "推荐参数组：quick_check" in content
+    assert "优先参考 1 日周期，至少 1 个有效样本" in content

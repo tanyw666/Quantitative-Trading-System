@@ -270,6 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
     experiments.add_argument("--horizons", default="1,3,5", help="验证周期，例如 1,3,5")
     experiments.add_argument("--top", type=int, default=5)
     experiments.add_argument("--min-history", type=int, default=25)
+    experiments.add_argument("--recommend-horizon", type=int, default=3, help="报告推荐优先参考的验证周期")
+    experiments.add_argument("--recommend-min-count", type=int, default=5, help="报告给出推荐所需的最小样本数")
     experiments.add_argument("--output", type=Path, help="可选：保存 JSON 实验结果")
     experiments.add_argument("--report-output", type=Path, help="可选：保存 Markdown 实验报告")
 
@@ -938,7 +940,13 @@ def run_optimize_experiments(args: argparse.Namespace) -> None:
         print(text)
     if args.report_output:
         args.report_output.parent.mkdir(parents=True, exist_ok=True)
-        args.report_output.write_text(ExperimentReport().render(payload), encoding="utf-8")
+        args.report_output.write_text(
+            ExperimentReport(
+                preferred_horizon=args.recommend_horizon,
+                min_count=args.recommend_min_count,
+            ).render(payload),
+            encoding="utf-8",
+        )
         print(str(args.report_output))
 
 

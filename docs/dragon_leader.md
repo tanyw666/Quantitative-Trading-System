@@ -91,6 +91,12 @@ python -m quant_system optimize experiments --csv data/sample_dragon_next_open_o
 
 The built-in `dragon_next_open_gap` preset compares `max_next_open_gap` values of `0.03`, `0.05`, `0.07`, and `0.10` against `min_next_open_gap` values of `-0.01`, `-0.03`, and `-0.05`. For the `next-open` model, reports keep the buy date and executable price context while carrying the previous setup day's dragon metadata (`entry_gate`, `dragon_tags`, seal quality, and state), so parameter evaluation is tied to the original signal quality.
 
+By default the report only recommends a parameter set when the preferred horizon has at least 5 valid samples. For small-sample debugging, the recommendation gate can be loosened explicitly:
+
+```powershell
+python -m quant_system optimize experiments --csv data/sample_dragon_next_open_ohlcv.csv --preset dragon_next_open_gap --horizons 1 --top 1 --min-history 25 --recommend-horizon 1 --recommend-min-count 1 --report-output reports/dragon_gap_experiments_relaxed.md
+```
+
 ## Dragon Tags
 
 - `reseal-candidate`: daily bars suggest the stock touched limit-up, traded below the limit price, and still closed at limit-up. This is a conservative daily-bar proxy, not order-book proof.

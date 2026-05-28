@@ -16,8 +16,16 @@ class ExperimentRecommendation:
 
 
 class ExperimentReport:
+    def __init__(self, preferred_horizon: int = 3, min_count: int = 5) -> None:
+        self.preferred_horizon = preferred_horizon
+        self.min_count = min_count
+
     def render(self, results: list[dict]) -> str:
-        recommendation = recommend_experiment(results)
+        recommendation = recommend_experiment(
+            results,
+            preferred_horizon=self.preferred_horizon,
+            min_count=self.min_count,
+        )
         lines = [
             "# 策略参数实验报告",
             "",
@@ -63,7 +71,7 @@ class ExperimentReport:
                 )
 
         lines.extend(["", "## 3. 使用提醒", ""])
-        lines.append("- 默认至少需要 5 个有效样本才给推荐；样本不足时只展示明细，不输出结论。")
+        lines.append(f"- 当前推荐门槛：优先参考 {self.preferred_horizon} 日周期，至少 {self.min_count} 个有效样本。")
         lines.append("- 优先选择样本数足够、收益和胜率都稳定的参数组，不要只看最高收益。")
         lines.append("- 参数实验是研究工具，不代表未来收益保证。")
         lines.append("")
