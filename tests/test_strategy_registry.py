@@ -1,0 +1,88 @@
+from pathlib import Path
+
+from quant_system.strategies.dragon_leader import DragonLeaderStrategy
+from quant_system.strategies.registry import create_strategy_from_config
+from quant_system.strategies.strong_stock_screen import StrongStockScreen
+
+
+def test_create_strategy_from_parameter_config(tmp_path: Path):
+    path = tmp_path / "strategy.yaml"
+    path.write_text(
+        """
+name: tuned_strong
+strategy: strong_stock_screen
+params:
+  min_20d_return: 0.2
+  min_volume_ratio: 2.0
+  max_atr_pct: 0.08
+""",
+        encoding="utf-8",
+    )
+
+    strategy = create_strategy_from_config(path)
+
+    assert isinstance(strategy, StrongStockScreen)
+    assert strategy.min_20d_return == 0.2
+    assert strategy.min_volume_ratio == 2.0
+    assert strategy.max_atr_pct == 0.08
+    assert strategy.scoring_weights == {}
+
+
+def test_create_strategy_from_exported_dragon_config(tmp_path: Path):
+    path = tmp_path / "dragon.yaml"
+    path.write_text(
+        """
+name: tuned_dragon
+strategy: dragon_leader
+params:
+  entry_gate: pass
+  entry_model: next_open
+  max_next_open_gap: 0.03
+""",
+        encoding="utf-8",
+    )
+
+    strategy = create_strategy_from_config(path)
+
+    assert isinstance(strategy, DragonLeaderStrategy)
+    assert strategy.entry_gate == "pass"
+    assert strategy.entry_model == "next_open"
+    assert strategy.max_next_open_gap == 0.03
+
+
+def test_create_strategy_from_config_attaches_scoring_weights(tmp_path: Path):
+    path = tmp_path / "weighted.yaml"
+    path.write_text(
+        """
+name: weighted_strong
+strategy: strong_stock_screen
+params:
+  min_20d_return: 0.2
+scoring_weights:
+  momentum_20: 0.8
+  volume_ratio_20: 0.1
+""",
+        encoding="utf-8",
+    )
+
+    strategy = create_strategy_from_config(path)
+
+    assert isinstance(strategy, StrongStockScreen)
+    assert strategy.scoring_weights == {"momentum_20": 0.8, "volume_ratio_20": 0.1}
+
+
+def test_create_strategy_from_legacy_name_config(tmp_path: Path):
+    path = tmp_path / "legacy.yaml"
+    path.write_text(
+        """
+name: strong_stock_screen
+params:
+  min_20d_return: 0.2
+""",
+        encoding="utf-8",
+    )
+
+    strategy = create_strategy_from_config(path)
+
+    assert isinstance(strategy, StrongStockScreen)
+    assert strategy.min_20d_return == 0.2

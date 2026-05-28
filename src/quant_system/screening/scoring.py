@@ -4,6 +4,8 @@ import pandas as pd
 
 from quant_system.config.settings import DEFAULT_SCORING_WEIGHTS
 
+SUPPORTED_SCORE_COLUMNS = ("momentum_20", "volume_ratio_20", "atr_pct_14", "sector_strength_score")
+
 
 def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = None) -> pd.DataFrame:
     if frame.empty:
@@ -14,10 +16,10 @@ def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = Non
     scored["score"] = 0.0
 
     rules: list[tuple[str, float, bool]] = [
-        ("momentum_20", float(weights.get("momentum_20", 0.50)), True),
-        ("volume_ratio_20", float(weights.get("volume_ratio_20", 0.30)), True),
-        ("atr_pct_14", float(weights.get("atr_pct_14", 0.20)), False),
-        ("sector_strength_score", float(weights.get("sector_strength_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[0], float(weights.get("momentum_20", 0.50)), True),
+        (SUPPORTED_SCORE_COLUMNS[1], float(weights.get("volume_ratio_20", 0.30)), True),
+        (SUPPORTED_SCORE_COLUMNS[2], float(weights.get("atr_pct_14", 0.20)), False),
+        (SUPPORTED_SCORE_COLUMNS[3], float(weights.get("sector_strength_score", 0.0)), True),
     ]
 
     used_weight = 0.0

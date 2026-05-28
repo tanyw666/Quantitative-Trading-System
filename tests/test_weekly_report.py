@@ -22,6 +22,28 @@ def test_weekly_report_renders_selection_and_trade_stats():
                     "score": 0.0315,
                 },
             },
+            promotion_summary={
+                "total": 2,
+                "ok_count": 2,
+                "failed_count": 0,
+                "backtest_count": 2,
+                "latest_created_at": "2026-05-28T08:48:17+00:00",
+                "best_backtest": {
+                    "output": "configs/strategies/promoted.yaml",
+                    "total_return": 0.08,
+                    "sharpe": 1.5,
+                    "trades": 4,
+                },
+                "records": [
+                    {
+                        "created_at": "2026-05-28T08:48:17+00:00",
+                        "output": "configs/strategies/promoted.yaml",
+                        "ok": True,
+                        "total_return": 0.08,
+                        "sharpe": 1.5,
+                    }
+                ],
+            },
             trade_stats={
                 "total_trades": 1,
                 "buy_count": 1,
@@ -39,6 +61,8 @@ def test_weekly_report_renders_selection_and_trade_stats():
     assert "3日" in content
     assert "按进场闸门" in content
     assert "策略实验" in content
+    assert "策略晋升" in content
+    assert "promoted.yaml" in content
     assert "balanced" in content
     assert "min_20d_return=0.12" in content
     assert "pass" in content

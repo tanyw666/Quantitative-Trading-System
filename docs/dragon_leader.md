@@ -103,6 +103,14 @@ To make the recommendation machine-readable for later weekly reports or automati
 python -m quant_system optimize experiments --csv data/sample_dragon_next_open_ohlcv.csv --preset dragon_next_open_gap --horizons 1 --top 1 --min-history 25 --recommend-horizon 1 --recommend-min-count 1 --summary-output reports/dragon_gap_experiment_summary.json
 ```
 
+To turn the recommended parameter set into a reusable strategy YAML:
+
+```powershell
+python -m quant_system optimize export-strategy --summary reports/dragon_gap_experiment_summary.json --output configs/strategies/dragon_gap_recommended.yaml
+```
+
+The exported YAML can then be fed back into `screen`, `report`, or `backtest` through `--config`.
+
 ## Dragon Tags
 
 - `reseal-candidate`: daily bars suggest the stock touched limit-up, traded below the limit price, and still closed at limit-up. This is a conservative daily-bar proxy, not order-book proof.

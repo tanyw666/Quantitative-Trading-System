@@ -1,8 +1,5 @@
 name: trend_breakout
 description: 均线趋势突破策略样例
+strategy: trend_breakout
 params:
-  fast_window: 5
-  slow_window: 20
-  breakout_window: 20
-  atr_window: 14
   min_momentum: 0.03

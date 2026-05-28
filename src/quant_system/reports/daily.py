@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from quant_system.reports.experiment_summary import render_experiment_summary_lines
+from quant_system.reports.promotion_summary import render_promotion_summary_lines
+
 
 @dataclass(frozen=True)
 class DailyReportInput:
@@ -12,6 +15,8 @@ class DailyReportInput:
     risks: list[str]
     market_temperature: dict | None = None
     allocation_plan: dict | None = None
+    experiment_summary: dict | None = None
+    promotion_summary: dict | None = None
 
 
 class DailyReport:
@@ -70,7 +75,13 @@ class DailyReport:
         else:
             lines.append("- 暂无候选，等待数据源和策略输出接入。")
 
-        lines.extend(["", "## 3. 仓位建议", ""])
+        lines.extend(["", "## 3. 策略参数参考", ""])
+        lines.extend(render_experiment_summary_lines(data.experiment_summary))
+
+        lines.extend(["", "## 4. 策略晋升", ""])
+        lines.extend(render_promotion_summary_lines(data.promotion_summary))
+
+        lines.extend(["", "## 5. 仓位建议", ""])
         if data.allocation_plan:
             plan = data.allocation_plan
             lines.append(
@@ -92,7 +103,7 @@ class DailyReport:
         else:
             lines.append("- 暂无仓位建议。")
 
-        lines.extend(["", "## 4. 风险提示", ""])
+        lines.extend(["", "## 6. 风险提示", ""])
         for risk in data.risks:
             lines.append(f"- {risk}")
         lines.append("")

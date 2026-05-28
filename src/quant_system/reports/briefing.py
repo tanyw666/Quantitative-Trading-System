@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from quant_system.reports.experiment_summary import render_experiment_summary_lines
+
 
 @dataclass(frozen=True)
 class BriefingInput:
@@ -13,6 +15,7 @@ class BriefingInput:
     position_book: dict
     holding_risk: dict
     sectors: list[dict] | None = None
+    experiment_summary: dict | None = None
 
 
 class BriefingReport:
@@ -63,11 +66,14 @@ class BriefingReport:
         else:
             lines.append("- 暂无板块字段，无法识别主线。")
 
+        lines.extend(["", "## 4. 策略参数参考", ""])
+        lines.extend(render_experiment_summary_lines(data.experiment_summary))
+
         plan = data.allocation_plan
         lines.extend(
             [
                 "",
-                "## 4. 仓位计划",
+                "## 5. 仓位计划",
                 "",
                 f"- 目标总仓位：{float(plan.get('target_exposure_pct', 0)):.1%}",
                 f"- 已分配仓位：{float(plan.get('allocated_pct', 0)):.1%}",
@@ -84,7 +90,7 @@ class BriefingReport:
         lines.extend(
             [
                 "",
-                "## 5. 当前持仓",
+                "## 6. 当前持仓",
                 "",
                 f"- 总市值：{float(book.get('total_market_value', 0)):.2f}",
                 f"- 总浮盈亏：{float(book.get('total_unrealized_pnl', 0)):.2f}",
@@ -105,11 +111,11 @@ class BriefingReport:
             lines.append("- 当前无持仓。")
 
         risk = data.holding_risk
-        lines.extend(["", "## 6. 风险检查", "", f"- 总状态：{risk.get('status', '')}"])
+        lines.extend(["", "## 7. 风险检查", "", f"- 总状态：{risk.get('status', '')}"])
         for check in risk.get("checks", []):
             lines.append(f"- [{check.get('status', '')}] {check.get('message', '')}")
 
-        lines.extend(["", "## 7. 今日动作", ""])
+        lines.extend(["", "## 8. 今日动作", ""])
         lines.extend(action_notes(temp, data.candidates, risk))
         lines.append("")
         return "\n".join(lines)

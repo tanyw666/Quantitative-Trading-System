@@ -11,13 +11,45 @@ def test_briefing_report_renders_core_sections():
             position_book={"total_market_value": 1000, "total_unrealized_pnl": 100, "total_exposure_pct": 0.1, "positions": []},
             holding_risk={"status": "pass", "checks": []},
             sectors=[{"sector": "银行", "strength_score": 80, "candidate_count": 1, "avg_momentum_20": 0.1}],
+            experiment_summary={
+                "preferred_horizon": 1,
+                "min_count": 5,
+                "result_count": 2,
+                "recommendation": {
+                    "name": "gap_hi_0.03_lo_-0.01",
+                    "strategy": "dragon_leader",
+                    "params": {"max_next_open_gap": 0.03},
+                    "mean_return": 0.02,
+                    "win_rate": 0.6,
+                    "score": 0.05,
+                },
+            },
         )
     )
 
     assert "市场温度" in content
     assert "今日候选" in content
     assert "主线板块" in content
+    assert "策略参数参考" in content
+    assert "gap_hi_0.03_lo_-0.01" in content
+    assert "平均收益：2.00%" in content
     assert "今日动作" in content
+
+
+def test_briefing_report_renders_empty_experiment_summary():
+    content = BriefingReport().render(
+        BriefingInput(
+            title="简报",
+            market_temperature={"score": 50, "regime": "warm", "stance": "观察", "advance_ratio": 0.5, "above_ma20_ratio": 0.5},
+            candidates=[],
+            allocation_plan={"target_exposure_pct": 0, "allocated_pct": 0, "items": []},
+            position_book={"total_market_value": 0, "total_unrealized_pnl": 0, "total_exposure_pct": 0, "positions": []},
+            holding_risk={"status": "pass", "checks": []},
+            experiment_summary={"preferred_horizon": 3, "min_count": 5, "result_count": 1, "recommendation": None},
+        )
+    )
+
+    assert "暂无满足门槛的推荐参数组" in content
 
 
 def test_action_notes_prioritizes_blocking_risk():

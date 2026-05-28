@@ -5,6 +5,9 @@ from datetime import date
 
 import pandas as pd
 
+from quant_system.reports.experiment_summary import render_experiment_summary_lines
+from quant_system.reports.promotion_summary import render_promotion_summary_lines
+
 
 @dataclass(frozen=True)
 class WeeklyReportInput:
@@ -15,6 +18,7 @@ class WeeklyReportInput:
     notes: list[str]
     gate_summary: list[dict] = field(default_factory=list)
     experiment_summary: dict | None = None
+    promotion_summary: dict | None = None
 
 
 class WeeklyReport:
@@ -68,35 +72,12 @@ class WeeklyReport:
                 )
 
         lines.extend(["", "## 3. 策略实验", ""])
-        if data.experiment_summary:
-            recommendation = data.experiment_summary.get("recommendation")
-            lines.extend(
-                [
-                    f"- 推荐参考周期：{int(data.experiment_summary.get('preferred_horizon', 0))}日",
-                    f"- 推荐样本门槛：{int(data.experiment_summary.get('min_count', 0))}",
-                    f"- 实验组数量：{int(data.experiment_summary.get('result_count', 0))}",
-                ]
-            )
-            if recommendation:
-                params = recommendation.get("params", {}) or {}
-                params_text = ", ".join(f"{key}={value}" for key, value in params.items()) or "无"
-                lines.extend(
-                    [
-                        f"- 推荐参数组：{recommendation.get('name', '')}",
-                        f"- 策略：{recommendation.get('strategy', '')}",
-                        f"- 参数：{params_text}",
-                        f"- 平均收益：{float(recommendation.get('mean_return', 0)):.2%}",
-                        f"- 胜率：{float(recommendation.get('win_rate', 0)):.1%}",
-                        f"- 样本数：{int(recommendation.get('count', 0))}",
-                        f"- 稳健评分：{float(recommendation.get('score', 0)):.4f}",
-                    ]
-                )
-            else:
-                lines.append("- 暂无满足门槛的推荐参数组。")
-        else:
-            lines.append("- 暂无策略实验摘要。")
+        lines.extend(render_experiment_summary_lines(data.experiment_summary))
 
-        lines.extend(["", "## 4. 交易纪律", ""])
+        lines.extend(["", "## 4. 策略晋升", ""])
+        lines.extend(render_promotion_summary_lines(data.promotion_summary))
+
+        lines.extend(["", "## 5. 交易纪律", ""])
         stats = data.trade_stats
         if stats.get("total_trades", 0):
             lines.extend(
@@ -122,7 +103,7 @@ class WeeklyReport:
         else:
             lines.append("- 暂无交易日志。")
 
-        lines.extend(["", "## 5. 下周改进", ""])
+        lines.extend(["", "## 6. 下周改进", ""])
         notes = data.notes or default_weekly_notes(data.selection_summary, stats)
         for note in notes:
             lines.append(f"- {note}")

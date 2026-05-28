@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant_system.config.settings import load_settings
+from quant_system.config.settings import SystemSettings
 from quant_system.backtest.engine import BacktestConfig, BacktestEngine
 from quant_system.data.cache import fetch_daily_to_cache, load_daily_cache, save_daily_cache
 from quant_system.data.csv_source import read_ohlcv_csv
@@ -23,6 +24,18 @@ from quant_system.market.sectors import (
     filter_candidates_by_top_sectors,
 )
 from quant_system.optimizer.experiments import load_experiment_cases, preset_cases, run_parameter_experiments
+from quant_system.optimizer.export_strategy import (
+    load_experiment_summary,
+    strategy_config_from_summary,
+    write_strategy_config,
+)
+from quant_system.optimizer.promotion import (
+    append_promotion_record,
+    promote_strategy_from_summary,
+    read_promotion_records,
+    summarize_promotion_records,
+)
+from quant_system.optimizer.strategy_validation import validate_strategy_config, validate_strategy_directory
 from quant_system.optimizer.selection_validation import (
     summarize_forward_returns,
     summarize_forward_returns_by,
@@ -97,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--top", type=int, help="日报只保留评分最高的前 N 只")
     daily.add_argument("--cash", type=float, default=100000, help="用于仓位建议的账户资金")
     daily.add_argument("--max-positions", type=int, default=5, help="仓位建议最多分配几只候选")
+    daily.add_argument("--experiment-summary", type=Path, help="策略实验摘要 JSON，来自 optimize experiments --summary-output")
+    daily.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="策略晋升历史 JSONL")
     add_sector_context_args(daily)
 
     weekly = report_sub.add_parser("weekly", help="生成 Markdown 周报")
@@ -109,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--config", type=Path, help="YAML 条件树策略配置")
     weekly.add_argument("--settings", type=Path, help="系统设置 YAML，覆盖评分和仓位规则")
     weekly.add_argument("--experiment-summary", type=Path, help="策略实验摘要 JSON，来自 optimize experiments --summary-output")
+    weekly.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="策略晋升历史 JSONL")
     weekly.add_argument("--note", action="append", default=[], help="下周改进事项，可重复传入")
 
     briefing = report_sub.add_parser("briefing", help="生成盘前/盘中作战简报")
@@ -118,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     briefing.add_argument("--config", type=Path, help="YAML 条件树策略配置")
     briefing.add_argument("--settings", type=Path, help="系统设置 YAML，覆盖评分和仓位规则")
     briefing.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    briefing.add_argument("--experiment-summary", type=Path, help="策略实验摘要 JSON，来自 optimize experiments --summary-output")
     briefing.add_argument("--cash", type=float, default=100000)
     briefing.add_argument("--top", type=int, default=5)
     add_sector_context_args(briefing)
@@ -206,6 +223,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     trade_stats = review_sub.add_parser("trade-stats", help="统计交易日志")
     trade_stats.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    promotions = review_sub.add_parser("promotions", help="汇总策略晋升历史")
+    promotions.add_argument("--log", type=Path, default=Path("data/review/promotions.jsonl"))
+    promotions.add_argument("--limit", type=int, default=20, help="最多展示最近 N 条记录")
 
     market = subparsers.add_parser("market", help="市场环境工具")
     market_sub = market.add_subparsers(dest="market_command", required=True)
@@ -276,6 +296,28 @@ def build_parser() -> argparse.ArgumentParser:
     experiments.add_argument("--output", type=Path, help="可选：保存 JSON 实验结果")
     experiments.add_argument("--report-output", type=Path, help="可选：保存 Markdown 实验报告")
     experiments.add_argument("--summary-output", type=Path, help="可选：保存结构化推荐摘要 JSON")
+    export_strategy = optimize_sub.add_parser("export-strategy", help="将实验推荐结果导出为策略 YAML 配置")
+    export_strategy.add_argument("--summary", type=Path, required=True, help="实验摘要 JSON，来自 optimize experiments --summary-output")
+    export_strategy.add_argument("--output", type=Path, required=True, help="输出的策略 YAML 文件路径")
+    export_strategy.add_argument("--name", help="可选：覆盖策略配置名称")
+    export_strategy.add_argument("--description", help="可选：覆盖策略配置描述")
+    validate_strategy = optimize_sub.add_parser("validate-strategy", help="检查策略 YAML 配置是否可用")
+    validate_strategy.add_argument("--config", type=Path, required=True, help="策略 YAML 配置路径")
+    validate_strategy.add_argument("--csv", type=Path, help="可选：用 OHLCV CSV 做一次 smoke 筛选")
+    validate_strategies = optimize_sub.add_parser("validate-strategies", help="批量检查策略 YAML 配置目录")
+    validate_strategies.add_argument("--dir", type=Path, default=Path("configs/strategies"), help="策略 YAML 配置目录")
+    validate_strategies.add_argument("--csv", type=Path, help="可选：用 OHLCV CSV 做一次 smoke 筛选")
+    promote_strategy = optimize_sub.add_parser("promote-strategy", help="导出实验推荐策略并立即体检/回测")
+    promote_strategy.add_argument("--summary", type=Path, required=True, help="实验摘要 JSON，来自 optimize experiments --summary-output")
+    promote_strategy.add_argument("--output", type=Path, required=True, help="输出的策略 YAML 文件路径")
+    promote_strategy.add_argument("--name", help="可选：覆盖策略配置名称")
+    promote_strategy.add_argument("--description", help="可选：覆盖策略配置描述")
+    promote_strategy.add_argument("--csv", type=Path, help="可选：用 OHLCV CSV 做 smoke 筛选/回测")
+    promote_strategy.add_argument("--backtest", action="store_true", help="体检通过后顺手跑一次回测")
+    promote_strategy.add_argument("--buy-price", choices=["close", "open"], default="close", help="回测买入成交基准价")
+    promote_strategy.add_argument("--cash", type=float, default=100000)
+    promote_strategy.add_argument("--promotion-output", type=Path, help="可选：保存晋级结果 JSON")
+    promote_strategy.add_argument("--promotion-log", type=Path, help="可选：追加写入策略晋级历史 JSONL")
 
     return parser
 
@@ -350,7 +392,23 @@ def strategy_from_args(args: argparse.Namespace):
 
 
 def settings_from_args(args: argparse.Namespace):
-    return load_settings(getattr(args, "settings", None))
+    settings = load_settings(getattr(args, "settings", None))
+    strategy = getattr(args, "_resolved_strategy", None)
+    override = getattr(strategy, "scoring_weights", None)
+    if not override:
+        return settings
+    merged = dict(settings.scoring.weights)
+    for key, value in dict(override).items():
+        merged[str(key)] = float(value)
+    return SystemSettings.from_mapping(
+        {
+            "scoring": {"weights": merged},
+            "risk": {
+                "regime_exposure": settings.risk.regime_exposure,
+                "cap_by_risk": settings.risk.cap_by_risk,
+            },
+        }
+    )
 
 
 def enrich_and_score_candidates(
@@ -377,6 +435,7 @@ def enrich_and_score_candidates(
 def run_screen(args: argparse.Namespace) -> None:
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
     settings = settings_from_args(args)
     results = strategy.screen(frame)
     results = enrich_and_score_candidates(
@@ -416,7 +475,7 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 
 def run_daily_report(args: argparse.Namespace) -> None:
-    settings = settings_from_args(args)
+    strategy = None
     selected: list[dict] = []
     risks = ["尚未接入实盘交易；所有候选只能作为研究和复盘输入。"]
     market_view = "等待接入盘后行情、指数环境和新闻数据。"
@@ -426,6 +485,8 @@ def run_daily_report(args: argparse.Namespace) -> None:
     if args.csv or (args.cache_dir and args.universe):
         frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
         strategy = strategy_from_args(args)
+        args._resolved_strategy = strategy
+        settings = settings_from_args(args)
         selected_frame = strategy.screen(frame)
         selected_frame = enrich_and_score_candidates(
             frame,
@@ -450,7 +511,13 @@ def run_daily_report(args: argparse.Namespace) -> None:
         SelectionTracker(args.tracker).record_many(records_from_selection(strategy.name, selected))
         market_view = f"基于 {strategy.name} 策略完成候选筛选，共 {len(selected)} 只。"
         risks.append("当前日报只基于技术面数据，尚未合并涨跌停、停牌、新闻和板块强度。")
+    else:
+        settings = settings_from_args(args)
 
+    experiment_summary = None
+    if args.experiment_summary and args.experiment_summary.exists():
+        experiment_summary = json.loads(args.experiment_summary.read_text(encoding="utf-8"))
+    promotion_summary = summarize_promotion_records(read_promotion_records(args.promotion_log), limit=5)
     content = DailyReport().render(
         DailyReportInput(
             title="A股量化日报",
@@ -459,6 +526,8 @@ def run_daily_report(args: argparse.Namespace) -> None:
             risks=risks,
             market_temperature=market_temperature,
             allocation_plan=allocation_plan,
+            experiment_summary=experiment_summary,
+            promotion_summary=promotion_summary,
         )
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -475,6 +544,8 @@ def run_weekly_report(args: argparse.Namespace) -> None:
     if args.csv:
         frame = read_ohlcv_csv(args.csv)
         strategy = strategy_from_args(args)
+        args._resolved_strategy = strategy
+        settings = settings_from_args(args)
         candidates = strategy.screen(frame)
         if not candidates.empty:
             from quant_system.screening.scoring import score_candidates
@@ -490,6 +561,7 @@ def run_weekly_report(args: argparse.Namespace) -> None:
     experiment_summary = None
     if args.experiment_summary and args.experiment_summary.exists():
         experiment_summary = json.loads(args.experiment_summary.read_text(encoding="utf-8"))
+    promotion_summary = summarize_promotion_records(read_promotion_records(args.promotion_log), limit=10)
     content = WeeklyReport().render(
         WeeklyReportInput(
             title="A股量化周报",
@@ -498,6 +570,7 @@ def run_weekly_report(args: argparse.Namespace) -> None:
             gate_summary=gate_summary,
             trade_stats=trade_stats,
             experiment_summary=experiment_summary,
+            promotion_summary=promotion_summary,
             notes=args.note,
         )
     )
@@ -541,9 +614,10 @@ def run_dragon_validation_report(args: argparse.Namespace) -> None:
 
 
 def run_briefing_report(args: argparse.Namespace) -> None:
-    settings = settings_from_args(args)
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
     candidates = strategy.screen(frame)
     candidates = enrich_and_score_candidates(
         frame,
@@ -580,6 +654,9 @@ def run_briefing_report(args: argparse.Namespace) -> None:
         sector_column=args.sector_column,
         top=args.sector_top,
     ).to_dict(orient="records")
+    experiment_summary = None
+    if args.experiment_summary and args.experiment_summary.exists():
+        experiment_summary = json.loads(args.experiment_summary.read_text(encoding="utf-8"))
     content = BriefingReport().render(
         BriefingInput(
             title="A股量化作战简报",
@@ -589,6 +666,7 @@ def run_briefing_report(args: argparse.Namespace) -> None:
             position_book=position_book,
             holding_risk=holding_risk,
             sectors=sectors,
+            experiment_summary=experiment_summary,
         )
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -801,10 +879,17 @@ def run_review_trade_stats(args: argparse.Namespace) -> None:
     print(json.dumps(summarize_trade_journal(records), ensure_ascii=False, indent=2))
 
 
+def run_review_promotions(args: argparse.Namespace) -> None:
+    records = read_promotion_records(args.log)
+    summary = summarize_promotion_records(records, limit=args.limit)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+
+
 def run_market_temperature(args: argparse.Namespace) -> None:
-    settings = settings_from_args(args)
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
     candidates = strategy.screen(frame)
     candidates = enrich_and_score_candidates(
         frame,
@@ -819,9 +904,10 @@ def run_market_temperature(args: argparse.Namespace) -> None:
 
 
 def run_market_sectors(args: argparse.Namespace) -> None:
-    settings = settings_from_args(args)
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
     candidates = strategy.screen(frame)
     candidates = enrich_and_score_candidates(
         frame,
@@ -836,9 +922,10 @@ def run_market_sectors(args: argparse.Namespace) -> None:
 
 
 def run_portfolio_allocate(args: argparse.Namespace) -> None:
-    settings = settings_from_args(args)
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
     candidates = strategy.screen(frame)
     candidates = enrich_and_score_candidates(
         frame,
@@ -863,9 +950,10 @@ def run_portfolio_allocate(args: argparse.Namespace) -> None:
 
 
 def run_portfolio_precheck(args: argparse.Namespace) -> None:
-    settings = settings_from_args(args)
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
     candidates = strategy.screen(frame)
     candidates = enrich_and_score_candidates(
         frame,
@@ -968,6 +1056,60 @@ def run_optimize_experiments(args: argparse.Namespace) -> None:
         print(str(args.summary_output))
 
 
+def run_optimize_export_strategy(args: argparse.Namespace) -> None:
+    summary = load_experiment_summary(args.summary)
+    config = strategy_config_from_summary(summary, name=args.name, description=args.description)
+    write_strategy_config(args.output, config)
+    print(str(args.output))
+
+
+def run_optimize_validate_strategy(args: argparse.Namespace) -> None:
+    frame = read_ohlcv_csv(args.csv) if args.csv else None
+    result = validate_strategy_config(args.config, frame=frame)
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
+    if not result.ok:
+        raise SystemExit(1)
+
+
+def run_optimize_validate_strategies(args: argparse.Namespace) -> None:
+    frame = read_ohlcv_csv(args.csv) if args.csv else None
+    results = validate_strategy_directory(args.dir, frame=frame)
+    payload = {
+        "ok": all(item.ok for item in results),
+        "count": len(results),
+        "items": [item.to_dict() for item in results],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    if not payload["ok"]:
+        raise SystemExit(1)
+
+
+def run_optimize_promote_strategy(args: argparse.Namespace) -> None:
+    frame = read_ohlcv_csv(args.csv) if args.csv else None
+    result = promote_strategy_from_summary(
+        summary_path=args.summary,
+        output_path=args.output,
+        name=args.name,
+        description=args.description,
+        frame=frame,
+        backtest=args.backtest,
+        buy_price_field=args.buy_price,
+        cash=args.cash,
+    )
+    payload = result.to_dict()
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    print(text)
+    if args.promotion_output:
+        args.promotion_output.parent.mkdir(parents=True, exist_ok=True)
+        args.promotion_output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.promotion_output))
+    if args.promotion_log:
+        append_promotion_record(args.promotion_log, result)
+        print(str(args.promotion_log))
+    if not result.ok:
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1008,6 +1150,8 @@ def main() -> None:
             run_review_trade_list(args)
         elif args.review_command == "trade-stats":
             run_review_trade_stats(args)
+        elif args.review_command == "promotions":
+            run_review_promotions(args)
     elif args.command == "market":
         if args.market_command == "temperature":
             run_market_temperature(args)
@@ -1025,5 +1169,13 @@ def main() -> None:
     elif args.command == "optimize":
         if args.optimize_command == "experiments":
             run_optimize_experiments(args)
+        elif args.optimize_command == "export-strategy":
+            run_optimize_export_strategy(args)
+        elif args.optimize_command == "validate-strategy":
+            run_optimize_validate_strategy(args)
+        elif args.optimize_command == "validate-strategies":
+            run_optimize_validate_strategies(args)
+        elif args.optimize_command == "promote-strategy":
+            run_optimize_promote_strategy(args)
     else:
         parser.error(f"Unknown command: {args.command}")
