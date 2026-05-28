@@ -77,16 +77,51 @@ def build_allocation_plan(
     if "score" not in selected.columns:
         selected["score"] = 50.0
 
-    score_weights = pd.to_numeric(selected["score"], errors="coerce").clip(lower=1).fillna(1)
-    raw_weights = score_weights / score_weights.sum()
+    selected = selected.reset_index(drop=True)
+    score_weights = pd.to_numeric(selected["score"], errors="coerce").clip(lower=1).fillna(1).astype(float)
+    if float(score_weights.sum()) <= 0:
+        score_weights = pd.Series([1.0] * len(selected), index=selected.index, dtype="float64")
+
+    allocated_pct_by_index = pd.Series(0.0, index=selected.index, dtype="float64")
+    active_indices = set(selected.index)
+    remaining_pct = float(target_exposure_pct)
+    epsilon = 1e-12
+
+    while remaining_pct > epsilon and active_indices:
+        active_list = [idx for idx in selected.index if idx in active_indices]
+        active_weights = score_weights.loc[active_list]
+        weight_sum = float(active_weights.sum())
+        if weight_sum <= 0:
+            active_weights = pd.Series([1.0] * len(active_list), index=active_list, dtype="float64")
+            weight_sum = float(active_weights.sum())
+
+        round_allocated = 0.0
+        next_active_indices: set[int] = set()
+        for idx in active_list:
+            row = selected.loc[idx]
+            risk_grade = str(row.get("risk_grade", "unknown"))
+            max_pct = min(cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)), remaining_pct)
+            desired_pct = remaining_pct * float(active_weights.loc[idx]) / weight_sum
+            target_pct = min(desired_pct, max_pct)
+            if target_pct > epsilon:
+                allocated_pct_by_index.loc[idx] += target_pct
+                round_allocated += target_pct
+            if desired_pct + epsilon < max_pct:
+                next_active_indices.add(idx)
+
+        if round_allocated <= epsilon:
+            break
+        remaining_pct = max(0.0, remaining_pct - round_allocated)
+        active_indices = next_active_indices
 
     items: list[AllocationItem] = []
     allocated_pct = 0.0
-    for (_, row), raw_weight in zip(selected.iterrows(), raw_weights, strict=False):
+    for idx, row in selected.iterrows():
+        target_pct = float(allocated_pct_by_index.loc[idx])
+        if target_pct <= epsilon:
+            continue
         risk_grade = str(row.get("risk_grade", "unknown"))
         max_pct = cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05))
-        desired_pct = target_exposure_pct * float(raw_weight)
-        target_pct = min(desired_pct, max_pct)
         allocated_pct += target_pct
         stop_price = row.get("atr_stop_price", None)
         if pd.isna(stop_price):
