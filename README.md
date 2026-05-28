@@ -47,8 +47,10 @@ python -m pip install -e .[dev]
 运行测试：
 
 ```powershell
-pytest
+python -m pytest
 ```
+
+如果 Windows 终端显示中文异常，先切到 UTF-8 代码页，或直接用 Windows Terminal / VS Code 终端查看。
 
 查看命令：
 

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from quant_system.strategies.dragon_leader import DragonLeaderStrategy
 from quant_system.strategies.registry import create_strategy_from_config
 from quant_system.strategies.strong_stock_screen import StrongStockScreen
@@ -86,3 +88,11 @@ params:
 
     assert isinstance(strategy, StrongStockScreen)
     assert strategy.min_20d_return == 0.2
+
+
+def test_create_strategy_from_config_rejects_non_mapping_root(tmp_path: Path):
+    path = tmp_path / "broken.yaml"
+    path.write_text("- not-a-mapping\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain a mapping"):
+        create_strategy_from_config(path)

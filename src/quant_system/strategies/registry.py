@@ -26,7 +26,9 @@ def create_strategy_from_config(path):
     except ImportError as exc:
         raise RuntimeError("PyYAML is not installed. Run: python -m pip install -e .[dev]") from exc
 
-    config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    config = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"Strategy config must contain a mapping at the root: {path}")
     if "condition" in config:
         return ConfigurableScreenStrategy.from_mapping(config)
     strategy_name = str(config.get("strategy", "")).strip()

@@ -34,6 +34,8 @@ def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = Non
 
     if used_weight:
         scored["score"] = scored["score"] / used_weight * 100
+    else:
+        scored["score"] = 0.0
 
     if "atr_pct_14" in scored.columns:
         scored["risk_grade"] = scored["atr_pct_14"].apply(_risk_grade)

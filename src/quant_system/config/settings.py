@@ -48,13 +48,19 @@ class SystemSettings:
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "SystemSettings":
         mapping = mapping or {}
-        scoring_mapping = mapping.get("scoring", {})
-        risk_mapping = mapping.get("risk", {})
+        scoring_mapping = _require_mapping(mapping.get("scoring", {}), "scoring")
+        risk_mapping = _require_mapping(mapping.get("risk", {}), "risk")
         return cls(
-            scoring=ScoringSettings(weights=_merge(DEFAULT_SCORING_WEIGHTS, scoring_mapping.get("weights"))),
+            scoring=ScoringSettings(weights=_merge(DEFAULT_SCORING_WEIGHTS, _require_mapping(scoring_mapping.get("weights", {}), "scoring.weights"))),
             risk=RiskSettings(
-                regime_exposure=_merge(DEFAULT_REGIME_EXPOSURE, risk_mapping.get("regime_exposure")),
-                cap_by_risk=_merge(DEFAULT_RISK_CAP, risk_mapping.get("cap_by_risk")),
+                regime_exposure=_merge(
+                    DEFAULT_REGIME_EXPOSURE,
+                    _require_mapping(risk_mapping.get("regime_exposure", {}), "risk.regime_exposure"),
+                ),
+                cap_by_risk=_merge(
+                    DEFAULT_RISK_CAP,
+                    _require_mapping(risk_mapping.get("cap_by_risk", {}), "risk.cap_by_risk"),
+                ),
             ),
         )
 
@@ -83,3 +89,11 @@ def _merge(defaults: dict[str, float], override: dict[str, Any] | None) -> dict[
                 continue
             merged[str(key)] = float(value)
     return merged
+
+
+def _require_mapping(value: Any, name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a mapping")
+    return value

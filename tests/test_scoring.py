@@ -42,3 +42,17 @@ def test_score_candidates_can_use_sector_strength_weight():
 
     assert scored.loc[0, "symbol"] == "000001"
     assert scored.loc[0, "score"] > scored.loc[1, "score"]
+
+
+def test_score_candidates_handles_frames_without_scoring_columns():
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000001"],
+            "close": [10],
+        }
+    )
+
+    scored = score_candidates(frame, weights={})
+
+    assert scored.loc[0, "score"] == 0.0
+    assert scored.loc[0, "risk_grade"] == "unknown"
