@@ -1,4 +1,4 @@
-from quant_system.reports.daily import DailyReport, DailyReportInput, render_data_health_lines
+﻿from quant_system.reports.daily import DailyReport, DailyReportInput, render_data_health_lines
 
 
 def test_daily_report_renders_selected_metrics():
@@ -61,6 +61,10 @@ def test_daily_report_renders_selected_metrics():
                     "selection_count": 5,
                     "trade_count": 2,
                     "promotion_count": 1,
+                    "trade_plan_match_rate": 0.88,
+                    "trade_plan_unmatched_count": 1,
+                    "trade_plan_orphan_count": 0,
+                    "trade_plan_avg_price_deviation_pct": 0.02,
                 }
             ],
             strategy_rotation=[
@@ -120,31 +124,39 @@ def test_daily_report_renders_selected_metrics():
                     "checks": [],
                 }
             ],
+            action_execution_summary={
+                "actionable_count": 1,
+                "executed_count": 1,
+                "partial_count": 0,
+                "missed_count": 0,
+                "execution_rate": 1.0,
+                "avg_delay_days": 0.0,
+                "avg_price_deviation_pct": -0.01,
+                "records": [{"action_date": "2026-05-29", "symbol": "000001", "action": "exit", "execution_status": "executed", "required_quantity": 1000, "executed_quantity": 1000, "delay_days": 0}],
+            },
         )
     )
 
     assert "000001 平安银行" in content
-    assert "今日优先级总览" in content
+    assert "今日策略总览" in content
     assert "20日动量 12.00%" in content
     assert "策略参数参考" in content
     assert "策略晋升" in content
     assert "统一摘要" in content
-    assert "策略健康度" in content
+    assert "策略健康" in content
     assert "dragon_leader" in content
     assert "策略约束复盘" in content
     assert "策略轮换建议" in content
     assert "策略轮换历史" in content
-    assert "历史综合领先" in content
     assert "执行偏差过大" in content
     assert "策略约束" in content
     assert "目标总仓位由 60.0% 下调至 30.0%" in content
     assert "交易前预检预览" in content
-    assert "000001 平安银行" in content
-    assert "明日动作建议" in content
-    assert "明日降半档执行" in content
+    assert "持仓动作执行审计" in content
+    assert "明日降半档执行" in content or "明日进入暂停观察" in content
     assert "promoted.yaml" in content
     assert "gap_hi_0.03_lo_-0.01" in content
-    assert "平均收益：2.00%" in content
+    assert "总收益 5.00%" in content
     assert "注意回撤" in content
 
 
@@ -238,11 +250,11 @@ def test_render_data_health_lines_translates_classified_warnings():
                 {
                     "name": "staleness",
                     "status": "warn",
-                    "message": "1 regular symbols look stale: 688121 卓然股份(29d) | 1 ST/special-status symbols stale separately: 000004 *ST国华(32d). As of 2026-05-29; oldest cached date reaches 2026-04-13.",
+                    "message": "1 regular symbols look stale: 688121 卓越股份(29d) | 1 ST/special-status symbols stale separately: 000004 *ST国华(32d). As of 2026-05-29; oldest cached date reaches 2026-04-13.",
                     "details": {
                         "regular_stale_count": 1,
                         "special_stale_count": 1,
-                        "regular_stale_samples": [{"symbol": "688121", "name": "卓然股份", "last_date": "2026-04-30"}],
+                        "regular_stale_samples": [{"symbol": "688121", "name": "卓越股份", "last_date": "2026-04-30"}],
                         "special_stale_samples": [{"symbol": "000004", "name": "*ST国华", "last_date": "2026-04-27"}],
                     },
                 },
@@ -253,5 +265,39 @@ def test_render_data_health_lines_translates_classified_warnings():
     joined = "\n".join(lines)
     assert "新股" in joined
     assert "普通股票行情滞后" in joined
-    assert "样本：688121 卓然股份(2026-04-30)" in joined
+    assert "样本：688121 卓越股份(2026-04-30)" in joined
     assert "[提示]" in joined
+
+
+def test_daily_report_reflects_trade_plan_audit_pressure():
+    content = DailyReport().render(
+        DailyReportInput(
+            title="日报",
+            market_view="市场偏强",
+            selected=[],
+            risks=[],
+            trade_plan_summary={
+                "total": 2,
+                "pass_count": 1,
+                "warn_count": 1,
+                "block_count": 0,
+                "planned_value": 2000,
+                "allowed_value": 1800,
+                "records": [
+                    {"trade_date": "2026-05-29", "symbol": "000001", "gate_status": "pass", "planned_pct": 0.1, "entry_price": 10.0},
+                ],
+            },
+            trade_plan_audit={
+                "total_plans": 2,
+                "matched_trades": 1,
+                "unmatched_plans": 1,
+                "orphan_trades": 1,
+                "match_rate": 0.5,
+                "avg_price_deviation_pct": 0.05,
+            },
+        )
+    )
+
+    assert "交易计划单" in content
+    assert "计划-成交审计" in content
+    assert "match rate" in content or "命中率" in content

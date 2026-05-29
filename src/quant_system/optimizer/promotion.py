@@ -27,6 +27,8 @@ class StrategyPromotionResult:
     cash: float
     validation: dict[str, Any]
     backtest: dict[str, Any] = field(default_factory=dict)
+    trade_plan_audit: dict[str, Any] = field(default_factory=dict)
+    trade_plan_pressure: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +42,8 @@ class StrategyPromotionResult:
             "cash": self.cash,
             "validation": self.validation,
             "backtest": self.backtest,
+            "trade_plan_audit": self.trade_plan_audit,
+            "trade_plan_pressure": self.trade_plan_pressure,
         }
 
 
@@ -52,18 +56,21 @@ def promote_strategy_from_summary(
     backtest: bool = False,
     buy_price_field: str = "close",
     cash: float = 100000.0,
+    trade_plan_pressure: dict[str, Any] | None = None,
 ) -> StrategyPromotionResult:
     summary = load_experiment_summary(summary_path)
     config = strategy_config_from_summary(summary, name=name, description=description)
     write_strategy_config(output_path, config)
 
-    validation = validate_strategy_config(output_path, frame=frame)
+    validation = validate_strategy_config(output_path, frame=frame, trade_plan_pressure=trade_plan_pressure)
     backtest_summary: dict[str, Any] = {}
     if validation.ok and backtest and frame is not None:
         strategy = create_strategy_from_config(output_path)
         backtest_summary = BacktestEngine(
             BacktestConfig(initial_cash=cash, buy_price_field=buy_price_field)
         ).run(frame, strategy).summary()
+
+    pressure = _trade_plan_pressure_from_validation(validation.to_dict(), trade_plan_pressure)
 
     return StrategyPromotionResult(
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -76,6 +83,7 @@ def promote_strategy_from_summary(
         cash=cash,
         validation=validation.to_dict(),
         backtest=backtest_summary,
+        trade_plan_pressure=pressure,
     )
 
 
@@ -101,6 +109,7 @@ def summarize_promotion_records(records: list[dict[str, Any]], limit: int = 20) 
     ok_records = [record for record in records if record.get("ok")]
     failed_records = [record for record in records if not record.get("ok")]
     backtested_records = [record for record in records if record.get("backtest")]
+    trade_plan_pressure = _latest_trade_plan_pressure(records)
 
     best_record = _best_backtest_record(backtested_records)
     return {
@@ -110,6 +119,7 @@ def summarize_promotion_records(records: list[dict[str, Any]], limit: int = 20) 
         "backtest_count": len(backtested_records),
         "latest_created_at": records[-1].get("created_at") if records else None,
         "best_backtest": _compact_promotion_record(best_record) if best_record else None,
+        "trade_plan_pressure": trade_plan_pressure,
         "records": [_compact_promotion_record(record) for record in visible_records],
     }
 
@@ -130,6 +140,7 @@ def _compact_promotion_record(record: dict[str, Any]) -> dict[str, Any]:
     backtest = record.get("backtest") or {}
     validation = record.get("validation") or {}
     smoke = validation.get("smoke") or {}
+    trade_plan_pressure = record.get("trade_plan_pressure") or {}
     return {
         "created_at": record.get("created_at"),
         "output": record.get("output"),
@@ -139,4 +150,63 @@ def _compact_promotion_record(record: dict[str, Any]) -> dict[str, Any]:
         "total_return": backtest.get("total_return"),
         "sharpe": backtest.get("sharpe"),
         "trades": backtest.get("trades"),
+        "trade_plan_status": trade_plan_pressure.get("status"),
+        "trade_plan_action": trade_plan_pressure.get("action"),
+        "trade_plan_score": trade_plan_pressure.get("score"),
+    }
+
+
+def _latest_trade_plan_pressure(records: list[dict[str, Any]]) -> dict[str, Any]:
+    for record in reversed(records):
+        pressure = record.get("trade_plan_pressure") or {}
+        if pressure:
+            return _compact_trade_plan_pressure(pressure)
+    return {}
+
+
+def _compact_trade_plan_pressure(pressure: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "score": round(float(pressure.get("score", 0) or 0), 2),
+        "status": str(pressure.get("status", "") or ""),
+        "action": str(pressure.get("action", "") or ""),
+        "match_rate": float(pressure.get("match_rate", 0) or 0) if pressure.get("match_rate") not in (None, "") else None,
+        "unmatched_plans": int(pressure.get("unmatched_plans", 0) or 0),
+        "orphan_trades": int(pressure.get("orphan_trades", 0) or 0),
+        "avg_price_deviation_pct": float(pressure.get("avg_price_deviation_pct", 0) or 0)
+        if pressure.get("avg_price_deviation_pct") not in (None, "")
+        else None,
+        "alerts": list(pressure.get("alerts", []) or []),
+    }
+
+
+def _trade_plan_pressure_from_validation(
+    validation: dict[str, Any],
+    trade_plan_pressure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    score = float(validation.get("score", 0) or 0)
+    status = str(validation.get("status", "") or "")
+    action = str(validation.get("action", "") or "")
+    alerts = list(validation.get("alerts", []) or [])
+    pressure = trade_plan_pressure or {}
+    match_rate = float(pressure.get("match_rate", 0) or 0)
+    unmatched_plans = int(pressure.get("unmatched_plans", 0) or 0)
+    orphan_trades = int(pressure.get("orphan_trades", 0) or 0)
+    avg_price_deviation_pct = abs(float(pressure.get("avg_price_deviation_pct", 0) or 0))
+    if match_rate > 0:
+        score = max(score - min((1.0 - match_rate) * 20.0, 15.0), 0.0)
+    if unmatched_plans:
+        score = max(score - min(unmatched_plans * 3.0, 9.0), 0.0)
+    if orphan_trades:
+        score = max(score - min(orphan_trades * 4.0, 12.0), 0.0)
+    if avg_price_deviation_pct > 0.03:
+        score = max(score - min(avg_price_deviation_pct * 100.0, 10.0), 0.0)
+    return {
+        "score": round(score, 2),
+        "status": status,
+        "action": action,
+        "alerts": alerts,
+        "match_rate": match_rate if match_rate > 0 else None,
+        "unmatched_plans": unmatched_plans,
+        "orphan_trades": orphan_trades,
+        "avg_price_deviation_pct": avg_price_deviation_pct if avg_price_deviation_pct > 0 else None,
     }

@@ -76,6 +76,15 @@ def test_run_workflow_premarket_runs_end_to_end(monkeypatch, tmp_path, capsys):
         refresh_stale_days=None,
         record_discipline=True,
         discipline_log=tmp_path / "discipline.jsonl",
+        target=[],
+        invalidate=[],
+        max_holding_days=20,
+        time_stop_min_return_pct=0.0,
+        profit_take_pct=0.5,
+        action_log=tmp_path / "position_actions.jsonl",
+        record_actions=False,
+        exit_log=tmp_path / "exit_plans.jsonl",
+        record_exit_plan=False,
     )
 
     monkeypatch.setattr(cli, "load_ohlcv_dataset", lambda *a, **k: pd.read_csv(csv_path))

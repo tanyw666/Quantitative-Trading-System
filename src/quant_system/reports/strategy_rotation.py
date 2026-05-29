@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 from quant_system.optimizer.health_labels import alert_reasons_text
+from quant_system.reports.trade_plan_pressure import format_trade_plan_pressure, normalize_trade_plan_pressure
 
 
 def build_strategy_rotation(
@@ -50,6 +51,43 @@ def build_strategy_rotation(
             score -= 6
             reasons.append("处于恢复观察")
 
+        pressure = normalize_trade_plan_pressure(item)
+        match_rate = float(pressure.get("match_rate", 0) or 0) if pressure else 0.0
+        unmatched_plans = int(pressure.get("unmatched_plans", 0) or 0) if pressure else 0
+        orphan_trades = int(pressure.get("orphan_trades", 0) or 0) if pressure else 0
+        avg_price_deviation_pct = float(pressure.get("avg_price_deviation_pct", 0) or 0) if pressure else 0.0
+        if pressure:
+            reasons.append(f"计划压力：{format_trade_plan_pressure(pressure)}")
+        if match_rate > 0 or unmatched_plans > 0 or orphan_trades > 0:
+            if match_rate < 0.7 or unmatched_plans >= 3 or orphan_trades >= 2:
+                score -= 28
+                reasons.append("计划-成交失配严重")
+                if policy_state in {"blocked", "cooldown"} or alert_level == "block":
+                    score -= 8
+                    reasons.append("失配叠加阻断状态")
+            elif match_rate < 0.85 or unmatched_plans > 0 or orphan_trades > 0 or abs(avg_price_deviation_pct) > 0.03:
+                score -= 12
+                reasons.append("计划-成交存在漂移")
+                if policy_state in {"watch", "repeated_warn"} or alert_level == "warn":
+                    score -= 4
+                    reasons.append("漂移叠加预警状态")
+        elif abs(avg_price_deviation_pct) > 0.03:
+            score -= 8
+            reasons.append("执行偏差偏大")
+
+        lifecycle_pressure = item.get("lifecycle_pressure") or {}
+        if lifecycle_pressure:
+            lifecycle_score = float(lifecycle_pressure.get("score", 100) or 100)
+            lifecycle_action = str(lifecycle_pressure.get("action", "keep") or "keep")
+            lifecycle_level = str(lifecycle_pressure.get("alert_level", "pass") or "pass")
+            score -= min((100.0 - lifecycle_score) * 0.25, 15.0)
+            if lifecycle_action == "pause" or lifecycle_level == "block":
+                score -= 18
+                reasons.append("生命周期闭环阻断")
+            elif lifecycle_action == "reduce" or lifecycle_level == "warn":
+                score -= 8
+                reasons.append("生命周期闭环降档")
+
         warn_count = int(constraint_counts.get("warn", 0))
         block_count = int(constraint_counts.get("block", 0))
         if warn_count:
@@ -61,7 +99,7 @@ def build_strategy_rotation(
 
         if has_backtest_promotion and index == 0:
             score += 4
-            reasons.append("近期有晋升/回测记录辅助")
+            reasons.append("近期有晋级/回测记录辅助")
         if item.get("alerts"):
             reasons.append(f"告警：{alert_reasons_text(item.get('alerts', []))}")
 
@@ -77,6 +115,13 @@ def build_strategy_rotation(
                 "policy_state": policy_state,
                 "recent_warn_count": warn_count,
                 "recent_block_count": block_count,
+                "trade_plan_match_rate": match_rate if match_rate > 0 else None,
+                "trade_plan_unmatched_count": unmatched_plans,
+                "trade_plan_orphan_count": orphan_trades,
+                "trade_plan_avg_price_deviation_pct": avg_price_deviation_pct
+                if match_rate > 0 or unmatched_plans > 0 or orphan_trades > 0
+                else None,
+                "lifecycle_pressure": lifecycle_pressure,
                 "reasons": reasons[:4],
             }
         )
@@ -104,6 +149,13 @@ def render_strategy_rotation_lines(rotation: list[dict] | None) -> list[str]:
     leader = rotation[0]
     lines.append("")
     lines.append(f"- 当前主线建议：{leader.get('strategy', '')}，{leader.get('action', '')}。")
+    pressure = normalize_trade_plan_pressure(leader)
+    if pressure:
+        lines.append(f"- 计划压力：{format_trade_plan_pressure(pressure)}")
+    lifecycle_pressure = leader.get("lifecycle_pressure") or {}
+    if lifecycle_pressure:
+        summary = lifecycle_pressure.get("summary") or f"状态 {lifecycle_pressure.get('status', '-')}"
+        lines.append(f"- 生命周期压力：{summary}")
     return lines
 
 

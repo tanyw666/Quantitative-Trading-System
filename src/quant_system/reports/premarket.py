@@ -10,6 +10,11 @@ from quant_system.reports.daily import render_data_health_lines
 from quant_system.reports.discipline_advice import render_discipline_advice_lines
 from quant_system.reports.discipline_summary import render_discipline_summary_lines
 from quant_system.reports.gate_review import render_gate_review_lines
+from quant_system.portfolio.position_actions import render_position_action_plan_lines
+from quant_system.portfolio.action_execution import render_action_execution_lines
+from quant_system.portfolio.exit_plan import render_exit_execution_lines, render_exit_plan_lines, render_lot_exit_execution_lines
+from quant_system.portfolio.lots import render_lot_book_lines
+from quant_system.reports.position_lifecycle import render_position_lifecycle_lines
 from quant_system.reports.pretrade import render_precheck_summary_lines
 from quant_system.reports.rotation_history import render_rotation_history_card_lines
 from quant_system.reports.strategy_health import render_strategy_health_lines
@@ -27,12 +32,19 @@ class PremarketReportInput:
     pretrade_checks: list[dict] | None
     position_book: dict | None
     holding_risk: dict | None
+    lot_book: dict | None = None
+    holding_action_plan: dict | None = None
+    exit_plan: dict | None = None
     strategy_health: list[dict] | None = None
     constraint_summary: dict | None = None
     strategy_rotation: list[dict] | None = None
     rotation_history: dict | None = None
     gate_review: dict | None = None
     trade_stats: dict | None = None
+    action_execution_summary: dict | None = None
+    exit_execution_summary: dict | None = None
+    lot_exit_execution_summary: dict | None = None
+    lifecycle_snapshot: dict | None = None
     discipline_summary: dict | None = None
     discipline_adherence: dict | None = None
 
@@ -56,6 +68,8 @@ class PremarketReport:
                 constraint_summary=data.constraint_summary,
                 allocation_plan=data.allocation_plan,
                 market_temperature=data.market_temperature,
+                holding_action_plan=data.holding_action_plan,
+                exit_plan=data.exit_plan,
             )
         )
 
@@ -113,8 +127,22 @@ class PremarketReport:
 
         lines.extend(["", "## 4. 持仓风险", ""])
         lines.extend(render_position_lines(data.position_book))
+        lines.extend(["", "### Lot Lifecycle", ""])
+        lines.extend(render_lot_book_lines(data.lot_book, limit=5))
         for check in (data.holding_risk or {}).get("checks", []) or []:
             lines.append(f"- [{check.get('status', '')}] {check.get('message', '')}")
+        lines.extend(["", "### 持仓动作计划", ""])
+        lines.extend(render_position_action_plan_lines(data.holding_action_plan))
+        lines.extend(["", "### Exit Plan", ""])
+        lines.extend(render_exit_plan_lines(data.exit_plan))
+        lines.extend(["", "### 持仓动作执行审计", ""])
+        lines.extend(render_action_execution_lines(data.action_execution_summary))
+        lines.extend(["", "### Exit Execution Audit", ""])
+        lines.extend(render_exit_execution_lines(data.exit_execution_summary))
+        lines.extend(["", "### Lot Exit Execution Audit", ""])
+        lines.extend(render_lot_exit_execution_lines(data.lot_exit_execution_summary))
+        lines.extend(["", "### Position Lifecycle", ""])
+        lines.extend(render_position_lifecycle_lines(data.lifecycle_snapshot))
         lines.append("")
         return "\n".join(lines)
 

@@ -112,3 +112,23 @@ def test_summarize_strategy_health_penalizes_large_execution_deviation_and_mista
     assert health[0].action == "pause"
     assert "emotion_tag" in health[0].alerts
     assert health[0].score < 65
+
+
+def test_summarize_strategy_health_uses_lifecycle_pressure_to_pause():
+    health = summarize_strategy_health(
+        selections=[{"date": "2026-05-29", "strategy": "dragon", "symbol": "000001", "close": 10}],
+        trades=[{"date": "2026-05-29", "strategy": "dragon", "symbol": "000001", "side": "BUY", "amount": 1000}],
+        promotions=[],
+        lifecycle_pressure={
+            "score": 60,
+            "alert_level": "block",
+            "action": "pause",
+            "alerts": ["lifecycle_block", "exit_execution_gap"],
+            "summary": "状态 block；退出执行 0.0%",
+        },
+    )
+
+    assert health[0].action == "pause"
+    assert health[0].alert_level == "block"
+    assert "lifecycle_block" in health[0].alerts
+    assert health[0].lifecycle_pressure["summary"] == "状态 block；退出执行 0.0%"

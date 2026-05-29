@@ -159,6 +159,14 @@ def apply_constraint_policy_to_health(
     adjusted["policy_state"] = policy.state
     adjusted["policy_note"] = policy.note
     adjusted["policy_exposure_multiplier"] = policy.exposure_multiplier
+    trade_plan_audit = dict(adjusted.get("trade_plan_audit") or {})
+    if trade_plan_audit:
+        adjusted["policy_trade_plan_match_rate"] = float(trade_plan_audit.get("match_rate", 0) or 0)
+        adjusted["policy_trade_plan_avg_price_deviation_pct"] = float(trade_plan_audit.get("avg_price_deviation_pct", 0) or 0)
+        if float(trade_plan_audit.get("match_rate", 0) or 0) < 0.85:
+            adjusted["policy_exposure_multiplier"] = min(float(adjusted.get("policy_exposure_multiplier", 1.0) or 1.0), warn_exposure_multiplier)
+            adjusted["alerts"] = _merge_alerts(list(adjusted.get("alerts", []) or []), "trade_plan_drift")
+        adjusted["policy_note"] = f"{policy.note}；计划命中率 {float(trade_plan_audit.get('match_rate', 0) or 0):.1%}"
     if _alert_rank(policy.alert_level) > _alert_rank(str(adjusted.get("alert_level", "pass"))):
         adjusted["alert_level"] = policy.alert_level
     if policy.action in {"pause", "reduce"}:

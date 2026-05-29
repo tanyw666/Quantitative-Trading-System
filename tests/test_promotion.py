@@ -68,6 +68,7 @@ def test_promote_strategy_from_summary_writes_and_validates_config(tmp_path: Pat
     assert result.strategy_name == "strong_stock_screen_recommended"
     assert result.backtest_requested is False
     assert result.validation["smoke"]["rows"] == 1
+    assert "trade_plan_pressure" in result.to_dict()
 
 
 def test_promote_strategy_from_summary_can_backtest(tmp_path: Path):
@@ -131,3 +132,32 @@ def test_summarize_promotion_records_compacts_history(tmp_path: Path):
     assert summary["backtest_count"] == 2
     assert summary["best_backtest"]["output"].endswith("promoted.yaml")
     assert len(summary["records"]) == 1
+
+
+def test_promotion_summary_compacts_trade_plan_pressure(tmp_path: Path):
+    output = tmp_path / "promoted.yaml"
+    result = promote_strategy_from_summary(summary_file(tmp_path), output, frame=sample_frame(), backtest=True)
+    records = [result.to_dict()]
+    records[0]["trade_plan_pressure"] = {"score": 88, "status": "watch", "action": "reduce", "alerts": ["trade_plan_drift"]}
+
+    summary = summarize_promotion_records(records, limit=1)
+
+    assert summary["trade_plan_pressure"]["status"] == "watch"
+    assert summary["records"][0]["trade_plan_status"] == "watch"
+    assert summary["records"][0]["trade_plan_action"] == "reduce"
+
+
+def test_promote_strategy_from_summary_accepts_trade_plan_pressure(tmp_path: Path):
+    output = tmp_path / "promoted.yaml"
+    pressure = {"match_rate": 0.6, "unmatched_plans": 3, "orphan_trades": 2, "avg_price_deviation_pct": 0.05}
+
+    result = promote_strategy_from_summary(
+        summary_file(tmp_path),
+        output,
+        frame=sample_frame(),
+        trade_plan_pressure=pressure,
+    )
+
+    payload = result.to_dict()
+    assert payload["trade_plan_pressure"]["score"] < 100
+    assert payload["trade_plan_pressure"]["match_rate"] == 0.6

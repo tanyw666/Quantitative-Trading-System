@@ -11,6 +11,14 @@ ALERT_REASON_LABELS = {
     "constraint_cooldown": "策略冷静期",
     "repeated_warn": "连续预警",
     "recovery_probe": "恢复试仓",
+    "trade_plan_block": "交易计划阻断",
+    "trade_plan_drift": "交易计划漂移",
+    "trade_plan_mismatch": "计划成交失配",
+    "lifecycle_block": "持仓生命周期阻断",
+    "lifecycle_drift": "持仓生命周期漂移",
+    "action_execution_gap": "持仓动作未闭环",
+    "exit_execution_gap": "退出计划未闭环",
+    "lot_exit_execution_gap": "批次退出未闭环",
 }
 
 

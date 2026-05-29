@@ -27,6 +27,7 @@ def test_premarket_report_renders_execution_first_sections():
                 }
             ],
             position_book={"total_market_value": 0, "total_exposure_pct": 0, "total_unrealized_pnl": 0, "positions": []},
+            lot_book={"total_open_lots": 1, "total_closed_lots": 0, "open_market_value": 1000, "open_unrealized_pnl": 50, "realized_pnl": 0, "summary": {"realized_win_rate": 0.0}, "open_lots": [{"lot_id": "000001-1", "symbol": "000001", "entry_date": "2026-05-20", "remaining_quantity": 100, "entry_price": 10.0, "market_price": 10.5, "unrealized_pnl": 50.0, "holding_days": 2}], "action_items": []},
             holding_risk={"status": "pass", "checks": []},
             strategy_health=[{"strategy": "strong_stock_screen", "score": 70, "status": "watch", "action": "keep"}],
             constraint_summary={"total": 0, "records": []},
@@ -40,6 +41,7 @@ def test_premarket_report_renders_execution_first_sections():
     assert "数据与市场" in content
     assert "策略与仓位" in content
     assert "候选与预检" in content
+    assert "Lot Lifecycle" in content
     assert "000001 平安银行" in content
     assert "注意追高" in content
 

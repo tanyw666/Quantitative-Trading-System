@@ -22,6 +22,12 @@ class StrategyHealth:
     net_realized_amount: float
     win_rate: float | None
     avg_execution_deviation_pct: float | None
+    trade_plan_match_rate: float | None
+    trade_plan_unmatched_count: int
+    trade_plan_orphan_count: int
+    trade_plan_avg_price_deviation_pct: float | None
+    trade_plan_audit: dict[str, Any]
+    lifecycle_pressure: dict[str, Any]
     mistake_count: int
     top_mistake: str | None
     top_tag: str | None
@@ -40,6 +46,8 @@ def summarize_strategy_health(
     selections: list[dict[str, Any]],
     trades: list[dict[str, Any]],
     promotions: list[dict[str, Any]],
+    trade_plan_audits: dict[str, dict[str, Any]] | None = None,
+    lifecycle_pressure: dict[str, Any] | None = None,
 ) -> list[StrategyHealth]:
     strategies = sorted(
         {
@@ -84,6 +92,11 @@ def summarize_strategy_health(
         promotion_success_rate = (
             promotion_ok_count / promotion_count if promotion_count else None
         )
+        audit_summary = (trade_plan_audits or {}).get(strategy, {})
+        trade_plan_match_rate = _float_or_none(audit_summary.get("match_rate"))
+        trade_plan_unmatched_count = int(audit_summary.get("unmatched_plans", 0) or 0)
+        trade_plan_orphan_count = int(audit_summary.get("orphan_trades", 0) or 0)
+        trade_plan_avg_price_deviation_pct = _float_or_none(audit_summary.get("avg_price_deviation_pct"))
         score = _score_strategy(
             selection_count=selection_count,
             trade_count=trade_count,
@@ -95,9 +108,27 @@ def summarize_strategy_health(
             top_tag=top_tag,
             promotion_backtest_count=promotion_backtest_count,
             net_realized_amount=net_realized_amount,
+            trade_plan_audit=audit_summary,
         )
         status, action = _classify_score(score)
         action = _action_with_alerts(action, alert_level)
+        action, alert_level, alerts, score = _apply_trade_plan_audit_feedback(
+            action=action,
+            alert_level=alert_level,
+            alerts=alerts,
+            score=score,
+            audit_summary=audit_summary,
+        )
+        action, alert_level, alerts, score = _apply_lifecycle_pressure_feedback(
+            action=action,
+            alert_level=alert_level,
+            alerts=alerts,
+            score=score,
+            pressure=lifecycle_pressure,
+        )
+        status, base_action = _classify_score(score)
+        if action not in {"pause", "reduce"}:
+            action = _action_with_alerts(base_action, alert_level)
         results.append(
             StrategyHealth(
                 strategy=strategy,
@@ -115,6 +146,12 @@ def summarize_strategy_health(
                 net_realized_amount=net_realized_amount,
                 win_rate=win_rate,
                 avg_execution_deviation_pct=avg_execution_deviation_pct,
+                trade_plan_match_rate=trade_plan_match_rate,
+                trade_plan_unmatched_count=trade_plan_unmatched_count,
+                trade_plan_orphan_count=trade_plan_orphan_count,
+                trade_plan_avg_price_deviation_pct=trade_plan_avg_price_deviation_pct,
+                trade_plan_audit=audit_summary,
+                lifecycle_pressure=lifecycle_pressure or {},
                 mistake_count=mistake_count,
                 top_mistake=top_mistake,
                 top_tag=top_tag,
@@ -146,6 +183,12 @@ def _mean(values: list[float | None]) -> float | None:
 
 
 def _as_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _float_or_none(value: Any) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
@@ -237,6 +280,7 @@ def _score_strategy(
     top_tag: str | None,
     promotion_backtest_count: int,
     net_realized_amount: float,
+    trade_plan_audit: dict[str, Any] | None = None,
 ) -> float:
     score = 50.0
     score += min(selection_count, 20) * 0.8
@@ -255,6 +299,15 @@ def _score_strategy(
         score += min(net_realized_amount / 2000.0, 10.0)
     elif net_realized_amount < 0:
         score -= min(abs(net_realized_amount) / 2000.0, 15.0)
+    audit_summary = trade_plan_audit or {}
+    if audit_summary:
+        match_rate = float(audit_summary.get("match_rate", 0) or 0)
+        avg_price_deviation_pct = abs(float(audit_summary.get("avg_price_deviation_pct", 0) or 0))
+        unmatched_plans = int(audit_summary.get("unmatched_plans", 0) or 0)
+        orphan_trades = int(audit_summary.get("orphan_trades", 0) or 0)
+        score += match_rate * 10.0
+        score -= min(avg_price_deviation_pct * 200.0, 10.0)
+        score -= min(unmatched_plans * 2.0 + orphan_trades * 3.0, 12.0)
     return round(max(score, 0.0), 2)
 
 
@@ -298,6 +351,78 @@ def _classify_score(score: float) -> tuple[str, str]:
     if score >= 65:
         return "watch", "keep"
     return "weak", "reduce"
+
+
+def _apply_trade_plan_audit_feedback(
+    *,
+    action: str,
+    alert_level: str,
+    alerts: list[str],
+    score: float,
+    audit_summary: dict[str, Any] | None,
+) -> tuple[str, str, list[str], float]:
+    audit_summary = audit_summary or {}
+    if not audit_summary:
+        return action, alert_level, alerts, score
+    match_rate = float(audit_summary.get("match_rate", 0) or 0)
+    avg_price_deviation_pct = abs(float(audit_summary.get("avg_price_deviation_pct", 0) or 0))
+    unmatched_plans = int(audit_summary.get("unmatched_plans", 0) or 0)
+    orphan_trades = int(audit_summary.get("orphan_trades", 0) or 0)
+    if match_rate < 0.7 or orphan_trades >= 2:
+        alert_level = "block"
+        action = "pause"
+        score = max(score - 15.0, 0.0)
+        alerts = _merge_alerts(alerts, "trade_plan_block")
+    elif match_rate < 0.85 or avg_price_deviation_pct > 0.03 or unmatched_plans > 0:
+        if _alert_rank(alert_level) < _alert_rank("warn"):
+            alert_level = "warn"
+        if action != "pause":
+            action = "reduce"
+        score = max(score - 5.0, 0.0)
+        alerts = _merge_alerts(alerts, "trade_plan_drift")
+    return action, alert_level, alerts, score
+
+
+def _apply_lifecycle_pressure_feedback(
+    *,
+    action: str,
+    alert_level: str,
+    alerts: list[str],
+    score: float,
+    pressure: dict[str, Any] | None,
+) -> tuple[str, str, list[str], float]:
+    pressure = pressure or {}
+    if not pressure:
+        return action, alert_level, alerts, score
+
+    pressure_level = str(pressure.get("alert_level", "pass") or "pass")
+    pressure_action = str(pressure.get("action", "keep") or "keep")
+    pressure_score = pressure.get("score")
+    pressure_alerts = [str(item) for item in pressure.get("alerts", []) or []]
+
+    if pressure_score not in (None, ""):
+        score = max(score - min((100.0 - float(pressure_score)) * 0.35, 20.0), 0.0)
+    if _alert_rank(pressure_level) > _alert_rank(alert_level):
+        alert_level = pressure_level
+    if pressure_action == "pause":
+        action = "pause"
+    elif pressure_action == "reduce" and action != "pause":
+        action = "reduce"
+    alerts = _merge_alerts(alerts, *pressure_alerts)
+    return action, alert_level, alerts, score
+
+
+def _merge_alerts(alerts: list[str], *extra: str) -> list[str]:
+    result: list[str] = []
+    for item in [*alerts, *extra]:
+        value = str(item).strip()
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
+def _alert_rank(level: str) -> int:
+    return {"pass": 0, "warn": 1, "block": 2}.get(level, 0)
 
 
 def _action_with_alerts(action: str, alert_level: str) -> str:

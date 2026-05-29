@@ -39,6 +39,9 @@ params:
     assert result.ok
     assert result.strategy_type == "StrongStockScreen"
     assert result.smoke["rows"] == 1
+    assert result.score == 100.0
+    assert result.status == "ok"
+    assert result.action == "keep"
 
 
 def test_validate_strategy_config_warns_unknown_score_weight(tmp_path: Path):
@@ -56,6 +59,26 @@ scoring_weights:
     result = validate_strategy_config(path)
 
     assert result.ok
+    assert result.warnings
+
+
+def test_validate_strategy_config_marks_trade_plan_pressure(tmp_path: Path):
+    path = tmp_path / "strategy.yaml"
+    path.write_text(
+        """
+name: tuned
+strategy: strong_stock_screen
+""",
+        encoding="utf-8",
+    )
+
+    pressure = {"match_rate": 0.62, "unmatched_plans": 3, "orphan_trades": 2, "avg_price_deviation_pct": 0.05}
+    result = validate_strategy_config(path, frame=sample_frame().head(3), trade_plan_pressure=pressure)
+
+    assert result.score < 100
+    assert result.status == "warn"
+    assert result.action == "reduce"
+    assert "trade_plan_mismatch" in result.alerts
     assert result.warnings
 
 
@@ -89,3 +112,20 @@ strategy: trend_breakout
 
     assert len(results) == 2
     assert all(result.ok for result in results)
+
+
+def test_validate_strategy_directory_applies_trade_plan_pressure(tmp_path: Path):
+    (tmp_path / "one.yaml").write_text(
+        """
+name: one
+strategy: strong_stock_screen
+""",
+        encoding="utf-8",
+    )
+    pressure = {"match_rate": 0.6, "unmatched_plans": 2, "orphan_trades": 1}
+
+    results = validate_strategy_directory(tmp_path, trade_plan_pressure=pressure)
+
+    assert len(results) == 1
+    assert results[0].status == "warn"
+    assert results[0].action == "reduce"

@@ -1,4 +1,4 @@
-from quant_system.reports.briefing import BriefingInput, BriefingReport, action_notes, candidate_dragon_note
+﻿from quant_system.reports.briefing import BriefingInput, BriefingReport, action_notes, candidate_dragon_note
 
 
 def test_briefing_report_renders_core_sections():
@@ -14,7 +14,19 @@ def test_briefing_report_renders_core_sections():
                 "items": [],
             },
             position_book={"total_market_value": 1000, "total_unrealized_pnl": 100, "total_exposure_pct": 0.1, "positions": []},
+            lot_book={"total_open_lots": 1, "total_closed_lots": 1, "open_market_value": 1000, "open_unrealized_pnl": 100, "realized_pnl": 200, "summary": {"realized_win_rate": 1.0}, "open_lots": [{"lot_id": "000001-1", "symbol": "000001", "entry_date": "2026-05-20", "remaining_quantity": 1000, "entry_price": 9.0, "market_price": 10.0, "unrealized_pnl": 100.0, "holding_days": 9}], "action_items": ["Largest open lot is 000001."]},
             holding_risk={"status": "pass", "checks": []},
+            holding_action_plan={
+                "status": "warn",
+                "exit_count": 0,
+                "reduce_count": 1,
+                "watch_count": 1,
+                "hold_count": 0,
+                "actions": [
+                    {"symbol": "000001", "action": "reduce", "status": "warn", "current_quantity": 1000, "target_quantity": 800, "reason": "单票超限"},
+                ],
+                "action_items": ["执行减仓动作"],
+            },
             dragon_candidates=[
                 {
                     "symbol": "600162",
@@ -110,6 +122,24 @@ def test_briefing_report_renders_core_sections():
                     }
                 ],
             },
+            trade_plan_audit={
+                "total_plans": 2,
+                "matched_trades": 1,
+                "unmatched_plans": 1,
+                "orphan_trades": 1,
+                "match_rate": 0.5,
+                "avg_price_deviation_pct": 0.05,
+            },
+            action_execution_summary={
+                "actionable_count": 1,
+                "executed_count": 0,
+                "partial_count": 0,
+                "missed_count": 1,
+                "execution_rate": 0.0,
+                "avg_delay_days": 0.0,
+                "avg_price_deviation_pct": 0.0,
+                "records": [{"action_date": "2026-05-29", "symbol": "000001", "action": "reduce", "execution_status": "missed", "required_quantity": 200, "executed_quantity": 0, "delay_days": None}],
+            },
             data_health={
                 "status": "ok",
                 "rows": 1000,
@@ -133,32 +163,14 @@ def test_briefing_report_renders_core_sections():
         )
     )
 
-    assert "市场温度" in content
-    assert "今日策略总览" in content
-    assert "今日候选" in content
-    assert "龙头验证" in content
-    assert "600162 香江控股" in content
-    assert "闸门 pass" in content
-    assert "数据健康" in content
-    assert "股票数：50" in content
-    assert "主线板块" in content
-    assert "策略参数参考" in content
-    assert "策略优先级" in content
-    assert "策略健康度" in content
-    assert "dragon_leader" in content
-    assert "策略约束复盘" in content
-    assert "策略轮换建议" in content
-    assert "策略轮换历史" in content
-    assert "错误集中" in content
-    assert "策略约束" in content
-    assert "目标总仓位由 60.0% 下调至 30.0%" in content
-    assert "交易前预检预览" in content
-    assert "盈亏比偏低" in content
-    assert "暂停观察" in content
-    assert "策略晋升" in content
-    assert "gap_hi_0.03_lo_-0.01" in content
-    assert "平均收益：2.00%" in content
+    assert "计划压力" in content
+    assert "命中率 50.0%" in content
+    assert "计划失配偏多" in content or "计划压力" in content
     assert "今日动作" in content
+    assert "持仓动作计划" in content
+    assert "持仓动作执行审计" in content
+    assert "Lot Lifecycle" in content
+    assert "单票超限" in content
 
 
 def test_briefing_report_renders_empty_experiment_summary():

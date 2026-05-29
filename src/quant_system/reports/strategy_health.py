@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from quant_system.optimizer.health_labels import alert_reason_label, alert_reasons_text
+from quant_system.reports.trade_plan_pressure import format_trade_plan_pressure, normalize_trade_plan_pressure
 
 
 def render_strategy_health_lines(strategy_health: list[dict] | None, limit: int = 5) -> list[str]:
@@ -8,12 +9,15 @@ def render_strategy_health_lines(strategy_health: list[dict] | None, limit: int 
         return ["- 暂无策略健康度数据。"]
 
     lines = [
-        "| 策略 | 评分 | 状态 | 动作 | 告警 | 选股 | 交易 | 晋级 | 偏差 | 错误 |",
-        "| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| 策略 | 评分 | 状态 | 动作 | 告警 | 选股 | 交易 | 晋级 | 偏差 | 计划压力 | 生命周期 | 错误 |",
+        "| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
     ]
     for item in strategy_health[:limit]:
         deviation = item.get("avg_execution_deviation_pct")
         deviation_text = f"{float(deviation):.2%}" if deviation is not None else "-"
+        pressure = normalize_trade_plan_pressure(item)
+        pressure_text = format_trade_plan_pressure(pressure) if pressure else "-"
+        lifecycle_text = _lifecycle_pressure_text(item.get("lifecycle_pressure"))
         mistake_text = item.get("top_mistake") or "-"
         alert_text = _alert_label(str(item.get("alert_level", "pass")))
         lines.append(
@@ -26,6 +30,8 @@ def render_strategy_health_lines(strategy_health: list[dict] | None, limit: int 
             f"{int(item.get('trade_count', 0))} | "
             f"{int(item.get('promotion_count', 0))} | "
             f"{deviation_text} | "
+            f"{pressure_text} | "
+            f"{lifecycle_text} | "
             f"{mistake_text} |"
         )
     leader = strategy_health[0]
@@ -39,6 +45,12 @@ def render_strategy_health_lines(strategy_health: list[dict] | None, limit: int 
         lines.append(f"- 最近交易标签重心：{leader.get('top_tag')}。")
     if leader.get("alerts"):
         lines.append(f"- 当前告警：{alert_reasons_text(leader.get('alerts', []))}。")
+    pressure = normalize_trade_plan_pressure(leader)
+    if pressure:
+        lines.append(f"- 计划压力：{format_trade_plan_pressure(pressure)}")
+    lifecycle_pressure = leader.get("lifecycle_pressure")
+    if lifecycle_pressure:
+        lines.append(f"- 生命周期压力：{_lifecycle_pressure_text(lifecycle_pressure)}")
     policy = leader.get("constraint_policy") or {}
     if policy.get("note"):
         lines.append(f"- 执行状态：{policy.get('note')}")
@@ -59,7 +71,12 @@ def _status_label(status: str) -> str:
 
 
 def _action_label(action: str) -> str:
-    return {"increase": "提高优先级", "keep": "保持观察", "reduce": "降低仓位/暂停", "pause": "暂停策略"}.get(action, action)
+    return {
+        "increase": "提高优先级",
+        "keep": "保持观察",
+        "reduce": "降低仓位/暂停",
+        "pause": "暂停策略",
+    }.get(action, action)
 
 
 def _alert_label(level: str) -> str:
@@ -68,3 +85,22 @@ def _alert_label(level: str) -> str:
 
 def _alert_reason_label(alert: str) -> str:
     return alert_reason_label(alert)
+
+
+def _lifecycle_pressure_text(pressure: dict | None) -> str:
+    if not pressure:
+        return "-"
+    summary = str(pressure.get("summary", "") or "").strip()
+    if summary:
+        return summary
+    status = str(pressure.get("status", "") or "").strip()
+    score = pressure.get("score")
+    action = str(pressure.get("action", "") or "").strip()
+    parts = []
+    if status:
+        parts.append(f"状态 {status}")
+    if score not in (None, ""):
+        parts.append(f"评分 {float(score):.1f}")
+    if action:
+        parts.append(f"动作 {_action_label(action)}")
+    return "；".join(parts) if parts else "-"

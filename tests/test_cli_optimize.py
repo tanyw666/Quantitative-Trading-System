@@ -164,6 +164,95 @@ def test_optimize_health_cli_applies_constraint_policy(tmp_path, capsys):
     assert '"constraint_policy"' in output
 
 
+def test_optimize_validate_strategy_cli_accepts_trade_plan_log(tmp_path, capsys):
+    config = tmp_path / "strategy.yaml"
+    config.write_text(
+        """
+name: tuned
+strategy: strong_stock_screen
+""".strip(),
+        encoding="utf-8",
+    )
+    trade_plan_log = tmp_path / "trade_plans.jsonl"
+    trade_plan_log.write_text(
+        json.dumps(
+            {
+                "trade_date": "2026-05-29",
+                "strategy": "strong_stock_screen",
+                "symbol": "000001",
+                "entry_price": 10.0,
+                "planned_pct": 0.1,
+                "planned_value": 1000.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = Namespace(config=config, csv=None, trade_plan_log=trade_plan_log)
+
+    cli.run_optimize_validate_strategy(args)
+
+    output = capsys.readouterr().out
+    assert '"score":' in output
+    assert '"alerts":' in output
+
+
+def test_optimize_promote_strategy_cli_accepts_trade_plan_log(tmp_path, capsys):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "preferred_horizon": 1,
+                "min_count": 1,
+                "recommendation": {
+                    "name": "balanced",
+                    "strategy": "strong_stock_screen",
+                    "params": {"min_20d_return": 0.1},
+                    "score": 0.03,
+                },
+                "result_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "promoted.yaml"
+    trade_plan_log = tmp_path / "trade_plans.jsonl"
+    trade_plan_log.write_text(
+        json.dumps(
+            {
+                "trade_date": "2026-05-29",
+                "strategy": "strong_stock_screen",
+                "symbol": "000001",
+                "entry_price": 10.0,
+                "planned_pct": 0.1,
+                "planned_value": 1000.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = Namespace(
+        summary=summary_path,
+        output=output_path,
+        name=None,
+        description=None,
+        csv=None,
+        backtest=False,
+        buy_price="close",
+        cash=100000,
+        promotion_output=None,
+        promotion_log=None,
+        sqlite=None,
+        trade_plan_log=trade_plan_log,
+    )
+
+    cli.run_optimize_promote_strategy(args)
+
+    output = capsys.readouterr().out
+    assert '"trade_plan_pressure"' in output
+    assert '"trade_plan_score"' in output or '"score"' in output
+
+
 def test_optimize_health_cli_respects_constraint_policy_settings(tmp_path, capsys):
     sqlite_path = tmp_path / "quant.sqlite"
     settings_path = tmp_path / "settings.yaml"
@@ -486,3 +575,208 @@ def test_briefing_cli_includes_promotion_history(tmp_path, capsys):
 
     assert "策略晋升" in content
     assert "promoted.yaml" in content
+
+
+def test_optimize_health_cli_combines_trade_plan_jsonl(tmp_path, capsys):
+    selection_log = tmp_path / "selections.jsonl"
+    trade_log = tmp_path / "trades.jsonl"
+    plan_log = tmp_path / "trade_plans.jsonl"
+
+    selection_log.write_text(
+        json.dumps({"date": "2026-05-29", "strategy": "dragon", "symbol": "000001", "close": 10, "reason": "test"}) + "\n",
+        encoding="utf-8",
+    )
+    trade_log.write_text(
+        json.dumps({"date": "2026-05-29", "strategy": "dragon", "symbol": "000001", "side": "BUY", "price": 10.2, "quantity": 100, "amount": 1020, "execution_deviation_pct": 0.02}) + "\n",
+        encoding="utf-8",
+    )
+    plan_log.write_text(
+        json.dumps({"trade_date": "2026-05-29", "strategy": "dragon", "symbol": "000001", "entry_price": 10.0, "planned_pct": 0.1, "planned_value": 1000.0, "status": "pass", "gate_status": "pass"}) + "\n"
+        + json.dumps({"trade_date": "2026-05-29", "strategy": "dragon", "symbol": "000002", "entry_price": 11.0, "planned_pct": 0.1, "planned_value": 1000.0, "status": "warn", "gate_status": "warn"}) + "\n",
+        encoding="utf-8",
+    )
+
+    args = Namespace(
+        tracker=selection_log,
+        journal=trade_log,
+        log=plan_log,
+        sqlite=None,
+        promotion_log=tmp_path / "promotions.jsonl",
+        constraint_log=tmp_path / "constraints.jsonl",
+        settings=None,
+    )
+
+    cli.run_optimize_health(args)
+
+    output = capsys.readouterr().out
+    assert '"strategy": "dragon"' in output
+    assert '"trade_plan_match_rate"' in output
+    assert '"trade_plan_unmatched_count"' in output
+
+
+def test_optimize_rotation_cli_carries_trade_plan_signals_into_snapshot(tmp_path, capsys):
+    sqlite_path = tmp_path / "quant.sqlite"
+    snapshot_dir = tmp_path / "snapshots"
+    store = SQLiteStore(sqlite_path)
+    store.insert_selections(
+        [
+            {
+                "date": "2026-05-29",
+                "strategy": "dragon",
+                "symbol": "000001",
+                "name": "Demo",
+                "close": 10,
+                "reason": "test",
+            }
+        ]
+    )
+    store.insert_trade(
+        {
+            "date": "2026-05-29",
+            "strategy": "dragon",
+            "symbol": "000001",
+            "side": "BUY",
+            "price": 10.5,
+            "quantity": 100,
+            "amount": 1050,
+        }
+    )
+    store.insert_trade(
+        {
+            "date": "2026-05-29",
+            "strategy": "dragon",
+            "symbol": "000002",
+            "side": "BUY",
+            "price": 11.0,
+            "quantity": 100,
+            "amount": 1100,
+        }
+    )
+    store.insert_strategy_promotion(
+        {
+            "created_at": "2026-05-29T08:00:00+00:00",
+            "strategy_name": "dragon",
+            "output": "configs/strategies/dragon.yaml",
+            "ok": True,
+            "backtest_requested": True,
+            "backtest": {"total_return": 0.12, "sharpe": 1.8, "trades": 4},
+        }
+    )
+    store.insert_strategy_constraint(
+        {
+            "created_at": "2026-05-29T09:10:00+00:00",
+            "source": "portfolio.precheck",
+            "strategy": "dragon",
+            "alert_level": "warn",
+            "action": "reduce",
+            "alerts": ["execution_deviation"],
+            "note": "demo",
+        }
+    )
+
+    args = Namespace(
+        sqlite=sqlite_path,
+        settings=None,
+        promotion_log=tmp_path / "unused_promotions.jsonl",
+        constraint_log=tmp_path / "unused_constraints.jsonl",
+        limit=5,
+        format="json",
+        output=None,
+        snapshot_dir=snapshot_dir,
+    )
+
+    cli.run_optimize_rotation(args)
+
+    output = capsys.readouterr().out
+    snapshot_files = list(snapshot_dir.glob("rotation_*.json"))
+    assert snapshot_files
+    assert '"trade_plan_match_rate"' in output or '"trade_plan_match_rate"' in snapshot_files[0].read_text(encoding="utf-8")
+
+
+def test_optimize_validate_strategy_cli_accepts_trade_plan_log(tmp_path, capsys):
+    config = tmp_path / "strategy.yaml"
+    config.write_text(
+        """
+name: tuned
+strategy: strong_stock_screen
+""".strip(),
+        encoding="utf-8",
+    )
+    trade_plan_log = tmp_path / "trade_plans.jsonl"
+    trade_plan_log.write_text(
+        json.dumps(
+            {
+                "trade_date": "2026-05-29",
+                "strategy": "strong_stock_screen",
+                "symbol": "000001",
+                "entry_price": 10.0,
+                "planned_pct": 0.1,
+                "planned_value": 1000.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = Namespace(config=config, csv=None, trade_plan_log=trade_plan_log)
+
+    cli.run_optimize_validate_strategy(args)
+
+    output = capsys.readouterr().out
+    assert '"score":' in output
+    assert '"alerts":' in output
+
+
+def test_optimize_promote_strategy_cli_accepts_trade_plan_log(tmp_path, capsys):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "preferred_horizon": 1,
+                "min_count": 1,
+                "recommendation": {
+                    "name": "balanced",
+                    "strategy": "strong_stock_screen",
+                    "params": {"min_20d_return": 0.1},
+                    "score": 0.03,
+                },
+                "result_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "promoted.yaml"
+    trade_plan_log = tmp_path / "trade_plans.jsonl"
+    trade_plan_log.write_text(
+        json.dumps(
+            {
+                "trade_date": "2026-05-29",
+                "strategy": "strong_stock_screen",
+                "symbol": "000001",
+                "entry_price": 10.0,
+                "planned_pct": 0.1,
+                "planned_value": 1000.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = Namespace(
+        summary=summary_path,
+        output=output_path,
+        name=None,
+        description=None,
+        csv=None,
+        backtest=False,
+        buy_price="close",
+        cash=100000,
+        promotion_output=None,
+        promotion_log=None,
+        sqlite=None,
+        trade_plan_log=trade_plan_log,
+    )
+
+    cli.run_optimize_promote_strategy(args)
+
+    output = capsys.readouterr().out
+    assert '"trade_plan_pressure"' in output
+    assert '"trade_plan_score"' in output or '"score"' in output

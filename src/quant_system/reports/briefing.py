@@ -5,8 +5,8 @@ from datetime import date
 
 from quant_system.reports.action_advice import render_action_advice_lines
 from quant_system.reports.constraint_summary import render_constraint_summary_lines
-from quant_system.reports.discipline_adherence import render_discipline_adherence_lines
 from quant_system.reports.daily import render_data_health_lines
+from quant_system.reports.discipline_adherence import render_discipline_adherence_lines
 from quant_system.reports.discipline_advice import render_discipline_advice_lines
 from quant_system.reports.discipline_summary import render_discipline_summary_lines
 from quant_system.reports.experiment_summary import render_experiment_summary_lines
@@ -17,9 +17,16 @@ from quant_system.reports.promotion_summary import (
     summarize_promotion_priority,
 )
 from quant_system.reports.pretrade import render_precheck_summary_lines
+from quant_system.reports.rotation_history import render_rotation_history_card_lines
 from quant_system.reports.strategy_health import render_strategy_health_lines
 from quant_system.reports.strategy_rotation import render_strategy_rotation_lines
-from quant_system.reports.rotation_history import render_rotation_history_card_lines
+from quant_system.reports.trade_plan_summary import render_trade_plan_summary_lines
+from quant_system.portfolio.trade_plan_audit import render_trade_plan_audit_lines
+from quant_system.portfolio.position_actions import render_position_action_plan_lines
+from quant_system.portfolio.action_execution import render_action_execution_lines
+from quant_system.portfolio.exit_plan import render_exit_execution_lines, render_exit_plan_lines, render_lot_exit_execution_lines
+from quant_system.portfolio.lots import render_lot_book_lines
+from quant_system.reports.position_lifecycle import render_position_lifecycle_lines
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,8 @@ class BriefingInput:
     allocation_plan: dict
     position_book: dict
     holding_risk: dict
+    lot_book: dict | None = None
+    holding_action_plan: dict | None = None
     dragon_candidates: list[dict] | None = None
     sectors: list[dict] | None = None
     experiment_summary: dict | None = None
@@ -43,6 +52,13 @@ class BriefingInput:
     data_health: dict | None = None
     gate_review: dict | None = None
     trade_stats: dict | None = None
+    trade_plan_summary: dict | None = None
+    trade_plan_audit: dict | None = None
+    action_execution_summary: dict | None = None
+    exit_plan: dict | None = None
+    exit_execution_summary: dict | None = None
+    lot_exit_execution_summary: dict | None = None
+    lifecycle_snapshot: dict | None = None
     discipline_summary: dict | None = None
     discipline_adherence: dict | None = None
 
@@ -56,7 +72,7 @@ class BriefingReport:
             "",
             "## 0. 今日策略总览",
             "",
-            "## 策略优先级",
+            "### 策略优先级",
             "",
         ]
 
@@ -65,16 +81,16 @@ class BriefingReport:
         if priority.get("primary"):
             lines.append(f"- 统一摘要：{priority['primary']}")
 
-        lines.extend(["", "## 策略健康度", ""])
+        lines.extend(["", "### 策略健康度", ""])
         lines.extend(render_strategy_health_lines(data.strategy_health))
 
-        lines.extend(["", "## 策略约束复盘", ""])
+        lines.extend(["", "### 策略约束复盘", ""])
         lines.extend(render_constraint_summary_lines(data.constraint_summary))
 
-        lines.extend(["", "## 策略轮换建议", ""])
+        lines.extend(["", "### 策略轮换建议", ""])
         lines.extend(render_strategy_rotation_lines(data.strategy_rotation))
 
-        lines.extend(["", "## 策略轮换历史", ""])
+        lines.extend(["", "### 策略轮换历史", ""])
         lines.extend(render_rotation_history_card_lines(data.rotation_history))
 
         lines.extend(["", "## 1. 市场温度", ""])
@@ -167,20 +183,31 @@ class BriefingReport:
 
         lines.extend(["", "## 6.2 Gate Discipline", ""])
         lines.extend(render_gate_review_lines(data.gate_review))
-        lines.extend(["", "## 6.3 Discipline Advice", ""])
+        lines.extend(["", "## 6.1 交易计划汇总", ""])
+        lines.extend(render_trade_plan_summary_lines(data.trade_plan_summary))
+        lines.extend(["", "### 计划-成交审计", ""])
+        lines.extend(render_trade_plan_audit_lines(data.trade_plan_audit))
+        lines.extend(["", "### 持仓动作执行审计", ""])
+        lines.extend(render_action_execution_lines(data.action_execution_summary))
+        lines.extend(["", "### Exit Execution Audit", ""])
+        lines.extend(render_exit_execution_lines(data.exit_execution_summary))
+        lines.extend(["", "### Lot Exit Execution Audit", ""])
+        lines.extend(render_lot_exit_execution_lines(data.lot_exit_execution_summary))
+        lines.extend(["", "### Position Lifecycle", ""])
+        lines.extend(render_position_lifecycle_lines(data.lifecycle_snapshot))
+        lines.extend(["", "## 6.2 Discipline Advice", ""])
         lines.extend(
             render_discipline_advice_lines(
                 gate_review=data.gate_review,
                 trade_stats=data.trade_stats,
-                holding_risk=data.holding_risk,
                 allocation_plan=data.allocation_plan,
             )
         )
 
-        lines.extend(["", "## 6.4 Discipline History", ""])
+        lines.extend(["", "## 6.3 Discipline History", ""])
         lines.extend(render_discipline_summary_lines(data.discipline_summary))
 
-        lines.extend(["", "## 6.5 Discipline Adherence", ""])
+        lines.extend(["", "## 6.4 Discipline Adherence", ""])
         lines.extend(render_discipline_adherence_lines(data.discipline_adherence))
 
         book = data.position_book
@@ -207,18 +234,28 @@ class BriefingReport:
         else:
             lines.append("- 当前无持仓。")
 
+        lines.extend(["", "### Lot Lifecycle", ""])
+        lines.extend(render_lot_book_lines(data.lot_book, limit=5))
+
         risk = data.holding_risk
         lines.extend(["", "## 8. 风险检查", "", f"- 总状态：{risk.get('status', '')}"])
         for check in risk.get("checks", []):
             lines.append(f"- [{check.get('status', '')}] {check.get('message', '')}")
+        lines.extend(["", "### 持仓动作计划", ""])
+        lines.extend(render_position_action_plan_lines(data.holding_action_plan))
+        lines.extend(["", "### Exit Plan", ""])
+        lines.extend(render_exit_plan_lines(data.exit_plan))
 
         lines.extend(["", "## 9. 今日动作", ""])
         lines.extend(
             render_action_advice_lines(
                 strategy_health=data.strategy_health,
                 constraint_summary=data.constraint_summary,
+                trade_plan_audit=data.trade_plan_audit,
                 allocation_plan=data.allocation_plan,
                 market_temperature=temp,
+                holding_action_plan=data.holding_action_plan,
+                exit_plan=data.exit_plan,
             )
         )
         lines.append("")

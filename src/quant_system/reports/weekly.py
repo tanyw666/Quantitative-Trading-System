@@ -6,6 +6,7 @@ from datetime import date
 import pandas as pd
 
 from quant_system.reports.constraint_summary import render_constraint_summary_lines
+from quant_system.reports.action_advice import render_action_advice_lines
 from quant_system.reports.discipline_adherence import render_discipline_adherence_lines
 from quant_system.reports.discipline_advice import render_discipline_advice_lines
 from quant_system.reports.discipline_summary import render_discipline_summary_lines
@@ -19,6 +20,11 @@ from quant_system.reports.promotion_summary import (
 from quant_system.reports.strategy_health import render_strategy_health_lines
 from quant_system.reports.strategy_rotation import render_strategy_rotation_lines
 from quant_system.reports.rotation_history import render_rotation_history_card_lines
+from quant_system.reports.trade_plan_summary import render_trade_plan_summary_lines
+from quant_system.portfolio.trade_plan_audit import render_trade_plan_audit_lines
+from quant_system.portfolio.action_execution import render_action_execution_lines
+from quant_system.portfolio.exit_plan import render_exit_execution_lines, render_exit_plan_lines, render_lot_exit_execution_lines
+from quant_system.reports.position_lifecycle import render_position_lifecycle_lines
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,7 @@ class WeeklyReportInput:
     selection_summary: list[dict]
     trade_stats: dict
     notes: list[str]
+    trade_plan_summary: dict | None = None
     gate_summary: list[dict] = field(default_factory=list)
     experiment_summary: dict | None = None
     promotion_summary: dict | None = None
@@ -39,6 +46,12 @@ class WeeklyReportInput:
     gate_review: dict | None = None
     discipline_summary: dict | None = None
     discipline_adherence: dict | None = None
+    trade_plan_audit: dict | None = None
+    action_execution_summary: dict | None = None
+    exit_plan: dict | None = None
+    exit_execution_summary: dict | None = None
+    lot_exit_execution_summary: dict | None = None
+    lifecycle_snapshot: dict | None = None
 
 
 class WeeklyReport:
@@ -157,6 +170,8 @@ class WeeklyReport:
         lines.extend(["", "## 6. 下周改进", ""])
         lines.extend(["", "### Gate Discipline", ""])
         lines.extend(render_gate_review_lines(data.gate_review))
+        lines.extend(["", "### 交易计划单", ""])
+        lines.extend(render_trade_plan_summary_lines(data.trade_plan_summary))
         lines.extend(["", "### Discipline Advice", ""])
         lines.extend(
             render_discipline_advice_lines(
@@ -164,12 +179,35 @@ class WeeklyReport:
                 trade_stats=stats,
             )
         )
+        lines.extend(["", "### 计划-成交审计", ""])
+        lines.extend(render_trade_plan_audit_lines(data.trade_plan_audit))
+        lines.extend(["", "### 持仓动作执行审计", ""])
+        lines.extend(render_action_execution_lines(data.action_execution_summary))
+        lines.extend(["", "### Exit Plan", ""])
+        lines.extend(render_exit_plan_lines(data.exit_plan))
+        lines.extend(["", "### Exit Execution Audit", ""])
+        lines.extend(render_exit_execution_lines(data.exit_execution_summary))
+        lines.extend(["", "### Lot Exit Execution Audit", ""])
+        lines.extend(render_lot_exit_execution_lines(data.lot_exit_execution_summary))
+        lines.extend(["", "### Position Lifecycle", ""])
+        lines.extend(render_position_lifecycle_lines(data.lifecycle_snapshot))
 
         lines.extend(["", "### Discipline History", ""])
         lines.extend(render_discipline_summary_lines(data.discipline_summary))
 
         lines.extend(["", "### Discipline Adherence", ""])
         lines.extend(render_discipline_adherence_lines(data.discipline_adherence))
+
+        lines.extend(["", "## 7. 下周动作建议", ""])
+        lines.extend(
+            render_action_advice_lines(
+                strategy_health=data.strategy_health,
+                constraint_summary=data.constraint_summary,
+                trade_plan_audit=data.trade_plan_audit,
+                market_temperature=data.market_temperature,
+                exit_plan=data.exit_plan,
+            )
+        )
 
         notes = data.notes or default_weekly_notes(data.selection_summary, stats)
         for note in notes:

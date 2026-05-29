@@ -54,6 +54,19 @@ from quant_system.portfolio.discipline import (
     summarize_discipline_records,
 )
 from quant_system.portfolio.discipline_adherence import evaluate_discipline_adherence
+from quant_system.portfolio.trade_plan import build_trade_plan, build_trade_plan_batch, render_trade_plan_markdown
+from quant_system.portfolio.trade_plan import (
+    append_trade_plan_record,
+    read_trade_plan_records,
+    render_trade_plan_batch_markdown,
+    render_trade_plan_summary_markdown,
+    summarize_trade_plan_records,
+)
+from quant_system.portfolio.trade_plan_audit import (
+    render_trade_plan_audit_markdown,
+    render_trade_plan_audit_lines,
+    summarize_trade_plan_audit,
+)
 from quant_system.portfolio.journal import (
     TradeJournal,
     TradeJournalEntry,
@@ -62,6 +75,35 @@ from quant_system.portfolio.journal import (
     summarize_trade_journal,
 )
 from quant_system.portfolio.positions import build_position_book
+from quant_system.portfolio.lots import (
+    append_lot_book_record,
+    build_lot_book,
+    render_lot_book_markdown,
+)
+from quant_system.portfolio.lifecycle_pressure import build_lifecycle_pressure
+from quant_system.portfolio.action_execution import (
+    render_action_execution_lines,
+    render_action_execution_markdown,
+    summarize_action_execution,
+)
+from quant_system.portfolio.position_actions import (
+    append_position_action_plan_record,
+    build_position_action_plan,
+    read_position_action_plan_records,
+    render_position_action_plan_lines,
+)
+from quant_system.portfolio.exit_plan import (
+    append_exit_plan_record,
+    build_exit_plan,
+    build_lot_exit_plan,
+    read_exit_plan_records,
+    render_exit_execution_markdown,
+    render_exit_plan_lines,
+    render_exit_plan_markdown,
+    render_lot_exit_execution_markdown,
+    summarize_exit_execution,
+    summarize_lot_exit_execution,
+)
 from quant_system.portfolio.risk_check import check_holding_risk
 from quant_system.reports.briefing import BriefingInput, BriefingReport
 from quant_system.portfolio.selection_tracker import SelectionRecord, SelectionTracker
@@ -74,6 +116,7 @@ from quant_system.reports.experiments import ExperimentReport, build_experiment_
 from quant_system.reports.weekly import WeeklyReport, WeeklyReportInput
 from quant_system.reports.gate_review import render_gate_review_markdown
 from quant_system.reports.strategy_rotation import build_strategy_rotation, render_strategy_rotation_lines
+from quant_system.reports.trade_plan_summary import build_trade_plan_summary
 from quant_system.reports.rotation_history import (
     read_rotation_snapshots,
     render_rotation_history_card_lines,
@@ -82,6 +125,7 @@ from quant_system.reports.rotation_history import (
 )
 from quant_system.reports.pretrade import render_precheck_markdown
 from quant_system.reports.premarket import PremarketReport, PremarketReportInput
+from quant_system.reports.position_lifecycle import build_position_lifecycle_snapshot, render_position_lifecycle_markdown
 from quant_system.risk.pretrade import run_pretrade_check
 from quant_system.risk.sizing import build_allocation_plan
 from quant_system.risk.constraint_audit import (
@@ -95,6 +139,7 @@ from quant_system.screening.scoring import score_candidates
 from quant_system.strategies.dragon_leader import latest_dragon_diagnostics
 from quant_system.strategies.registry import create_strategy, create_strategy_from_config
 from quant_system.storage.sqlite_store import SQLiteStore
+from quant_system.storage.jsonl import append_jsonl
 from quant_system.data.provider_health import ProviderHealthStore
 
 def fetch_akshare_universe_with_retry(attempts: int = 3, retry_sleep: float = 0.5) -> pd.DataFrame:
@@ -193,6 +238,15 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_premarket.add_argument("--manifest", type=Path, default=Path("data/cache/manifest.jsonl"))
     workflow_premarket.add_argument("--limit", type=int, help="Limit refresh/repair targets")
     workflow_premarket.add_argument("--refresh-stale-days", type=int, help="Refresh cached symbols older than this many calendar days")
+    workflow_premarket.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    workflow_premarket.add_argument("--record-actions", action="store_true", help="Persist generated holding action plan")
+    workflow_premarket.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    workflow_premarket.add_argument("--record-exit-plan", action="store_true", help="Persist generated exit plan")
+    workflow_premarket.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    workflow_premarket.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    workflow_premarket.add_argument("--max-holding-days", type=int, default=20)
+    workflow_premarket.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    workflow_premarket.add_argument("--profit-take-pct", type=float, default=0.5)
 
     report = subparsers.add_parser("report", help="Generate reports")
     report_sub = report.add_subparsers(dest="report_command", required=True)
@@ -213,6 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
     add_discipline_record_args(daily)
     daily.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    daily.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    daily.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
     add_sector_context_args(daily)
 
     weekly = report_sub.add_parser("weekly", help="Generate weekly markdown report")
@@ -230,6 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
     add_discipline_record_args(weekly)
     weekly.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    weekly.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    weekly.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
     weekly.add_argument("--note", action="append", default=[], help="Weekly notes, repeatable")
 
     briefing = report_sub.add_parser("briefing", help="Generate trading briefing")
@@ -245,13 +303,20 @@ def build_parser() -> argparse.ArgumentParser:
     briefing.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
     add_discipline_record_args(briefing)
     briefing.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    briefing.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    briefing.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
     briefing.add_argument("--cash", type=float, default=100000)
     briefing.add_argument("--top", type=int, default=5)
     add_sector_context_args(briefing)
     briefing.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
     briefing.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    briefing.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    briefing.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
     briefing.add_argument("--max-exposure-pct", type=float, default=0.8)
     briefing.add_argument("--max-position-pct", type=float, default=0.2)
+    briefing.add_argument("--max-holding-days", type=int, default=20)
+    briefing.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    briefing.add_argument("--profit-take-pct", type=float, default=0.5)
 
     premarket = report_sub.add_parser("premarket", help="Generate premarket trading report")
     premarket.add_argument("--output", type=Path, default=Path("reports/premarket.md"))
@@ -270,11 +335,18 @@ def build_parser() -> argparse.ArgumentParser:
     premarket.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
     add_discipline_record_args(premarket)
     premarket.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    premarket.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    premarket.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
     add_sector_context_args(premarket)
     premarket.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
     premarket.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    premarket.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    premarket.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
     premarket.add_argument("--max-exposure-pct", type=float, default=0.8)
     premarket.add_argument("--max-position-pct", type=float, default=0.2)
+    premarket.add_argument("--max-holding-days", type=int, default=20)
+    premarket.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    premarket.add_argument("--profit-take-pct", type=float, default=0.5)
 
     dragon_report = report_sub.add_parser("dragon", help="Generate dragon validation report")
     dragon_report.add_argument("--output", type=Path, default=Path("reports/dragon_validation.md"))
@@ -427,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     trade_add.add_argument("--mistake-type", default="")
     trade_add.add_argument("--review", default="")
     trade_add.add_argument("--workflow-summary", type=Path, help="Premarket workflow JSON summary to attach gate status")
+    trade_add.add_argument("--trade-plan", type=Path, help="Trade plan JSON produced by portfolio plan")
     trade_add.add_argument("--gate-status", choices=["pass", "warn", "block"], default="")
     trade_add.add_argument("--gate-message", default="")
     trade_add.add_argument("--gate-reason", action="append", default=[], help="Gate reason, repeatable")
@@ -456,6 +529,69 @@ def build_parser() -> argparse.ArgumentParser:
     exceptions.add_argument("--limit", type=int, default=20, help="Show at most N recent records")
     exceptions.add_argument("--format", choices=["json", "markdown"], default="json")
     exceptions.add_argument("--output", type=Path, help="Optional output path")
+
+    trade_plan = review_sub.add_parser("trade-plan", help="Summarize recorded trade plans")
+    trade_plan.add_argument("--log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    trade_plan.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    trade_plan.add_argument("--limit", type=int, default=20, help="Show at most N recent records")
+    trade_plan.add_argument("--format", choices=["json", "markdown"], default="json")
+    trade_plan.add_argument("--output", type=Path, help="Optional output path")
+
+    trade_audit = review_sub.add_parser("trade-audit", help="Compare recorded trade plans with actual trades")
+    trade_audit.add_argument("--plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    trade_audit.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    trade_audit.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    trade_audit.add_argument("--limit", type=int, default=20, help="Show at most N recent records")
+    trade_audit.add_argument("--format", choices=["json", "markdown"], default="json")
+    trade_audit.add_argument("--output", type=Path, help="Optional output path")
+
+    action_execution = review_sub.add_parser("action-execution", help="Audit holding action plans against actual trades")
+    action_execution.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    action_execution.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    action_execution.add_argument("--sqlite", type=Path, help="Optional SQLite store path for trades")
+    action_execution.add_argument("--lookahead-days", type=int, default=3)
+    action_execution.add_argument("--limit", type=int, default=20)
+    action_execution.add_argument("--format", choices=["json", "markdown"], default="json")
+    action_execution.add_argument("--output", type=Path, help="Optional output path")
+
+    exit_audit = review_sub.add_parser("exit-audit", help="Audit exit plans against actual SELL trades")
+    exit_audit.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    exit_audit.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    exit_audit.add_argument("--sqlite", type=Path, help="Optional SQLite store path for trades")
+    exit_audit.add_argument("--lookahead-days", type=int, default=3)
+    exit_audit.add_argument("--limit", type=int, default=20)
+    exit_audit.add_argument("--format", choices=["json", "markdown"], default="json")
+    exit_audit.add_argument("--output", type=Path, help="Optional output path")
+
+    lot_exit_audit = review_sub.add_parser("lot-exit-audit", help="Audit lot-level exit plans against FIFO closed lots")
+    lot_exit_audit.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    lot_exit_audit.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    lot_exit_audit.add_argument("--sqlite", type=Path, help="Optional SQLite store path for trades")
+    lot_exit_audit.add_argument("--lookahead-days", type=int, default=3)
+    lot_exit_audit.add_argument("--limit", type=int, default=20)
+    lot_exit_audit.add_argument("--format", choices=["json", "markdown"], default="json")
+    lot_exit_audit.add_argument("--output", type=Path, help="Optional output path")
+
+    lot_stats = review_sub.add_parser("lot-stats", help="Summarize lot-level lifecycle from trade journal")
+    lot_stats.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    lot_stats.add_argument("--sqlite", type=Path, help="Optional SQLite store path for trades")
+    lot_stats.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    lot_stats.add_argument("--as-of", help="Snapshot date, defaults to today")
+    lot_stats.add_argument("--format", choices=["json", "markdown"], default="json")
+    lot_stats.add_argument("--output", type=Path, help="Optional output path")
+
+    lifecycle_review = review_sub.add_parser("lifecycle", help="Summarize full position lifecycle and execution closure")
+    lifecycle_review.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    lifecycle_review.add_argument("--sqlite", type=Path, help="Optional SQLite store path for trades")
+    lifecycle_review.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    lifecycle_review.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    lifecycle_review.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    lifecycle_review.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    lifecycle_review.add_argument("--as-of", help="Snapshot date, defaults to today")
+    lifecycle_review.add_argument("--lookahead-days", type=int, default=3)
+    lifecycle_review.add_argument("--limit", type=int, default=20)
+    lifecycle_review.add_argument("--format", choices=["json", "markdown"], default="json")
+    lifecycle_review.add_argument("--output", type=Path, help="Optional output path")
 
     promotions = review_sub.add_parser("promotions", help="Summarize strategy promotion history")
     promotions.add_argument("--log", type=Path, default=Path("data/review/promotions.jsonl"))
@@ -535,6 +671,68 @@ def build_parser() -> argparse.ArgumentParser:
     positions.add_argument("--cash", type=float, default=100000)
     positions.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
 
+    lots = portfolio_sub.add_parser("lots", help="Build lot-level position lifecycle")
+    lots.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    lots.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    lots.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    lots.add_argument("--as-of", help="Snapshot date, defaults to today")
+    lots.add_argument("--format", choices=["json", "markdown"], default="json")
+    lots.add_argument("--output", type=Path, help="Optional output path")
+    lots.add_argument("--log", type=Path, default=Path("data/review/lot_books.jsonl"))
+    lots.add_argument("--record", action="store_true", help="Append the generated lot lifecycle snapshot to JSONL")
+
+    lifecycle = portfolio_sub.add_parser("lifecycle", help="Build a unified position lifecycle snapshot")
+    lifecycle.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    lifecycle.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    lifecycle.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    lifecycle.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    lifecycle.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    lifecycle.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    lifecycle.add_argument("--as-of", help="Snapshot date, defaults to today")
+    lifecycle.add_argument("--lookahead-days", type=int, default=3)
+    lifecycle.add_argument("--limit", type=int, default=20)
+    lifecycle.add_argument("--format", choices=["json", "markdown"], default="json")
+    lifecycle.add_argument("--output", type=Path, help="Optional output path")
+
+    plan = portfolio_sub.add_parser("plan", help="Build and optionally persist a trade plan")
+    add_dataset_args(plan)
+    plan.add_argument("--symbol", required=True)
+    plan.add_argument("--entry-price", type=float, required=True)
+    plan.add_argument("--planned-pct", type=float, required=True)
+    plan.add_argument("--stop-price", type=float)
+    plan.add_argument("--target-price", type=float)
+    plan.add_argument("--strategy", default="strong_stock_screen")
+    plan.add_argument("--config", type=Path, help="Strategy YAML config")
+    plan.add_argument("--settings", type=Path, help="System settings YAML")
+    plan.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    plan.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    plan.add_argument("--cash", type=float, default=100000)
+    plan.add_argument("--top", type=int, default=5)
+    plan.add_argument("--trade-date", help="Optional trade date, defaults to today")
+    plan.add_argument("--format", choices=["json", "markdown"], default="json")
+    plan.add_argument("--output", type=Path, help="Optional output path for the rendered plan")
+    plan.add_argument("--log", type=Path, default=Path("data/review/trade_plans.jsonl"), help="Trade plan JSONL log")
+    plan.add_argument("--record", action="store_true", help="Append the generated plan to the JSONL log")
+    plan.add_argument("--discipline-exception", action="store_true", help="Mark the trade as a documented exception to discipline rules")
+    plan.add_argument("--exception-reason", default="", help="Reason for the documented discipline exception")
+
+    plan_batch = portfolio_sub.add_parser("plan-batch", help="Build and optionally persist a batch of trade plans")
+    add_dataset_args(plan_batch)
+    plan_batch.add_argument("--strategy", default="strong_stock_screen")
+    plan_batch.add_argument("--config", type=Path, help="Strategy YAML config")
+    plan_batch.add_argument("--settings", type=Path, help="System settings YAML")
+    plan_batch.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    plan_batch.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    plan_batch.add_argument("--cash", type=float, default=100000)
+    plan_batch.add_argument("--top", type=int, default=5)
+    plan_batch.add_argument("--trade-date", help="Optional trade date, defaults to today")
+    plan_batch.add_argument("--format", choices=["json", "markdown"], default="json")
+    plan_batch.add_argument("--output", type=Path, help="Optional output path for the rendered batch")
+    plan_batch.add_argument("--log", type=Path, default=Path("data/review/trade_plans.jsonl"), help="Trade plan JSONL log")
+    plan_batch.add_argument("--record", action="store_true", help="Append generated plans to the JSONL log")
+    plan_batch.add_argument("--discipline-exception", action="store_true", help="Mark the plans as documented exceptions to discipline rules")
+    plan_batch.add_argument("--exception-reason", default="", help="Reason for the documented discipline exception")
+
     holding_risk = portfolio_sub.add_parser("risk", help="Check holding risk")
     holding_risk.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
     holding_risk.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
@@ -543,6 +741,39 @@ def build_parser() -> argparse.ArgumentParser:
     holding_risk.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
     holding_risk.add_argument("--max-exposure-pct", type=float, default=0.8)
     holding_risk.add_argument("--max-position-pct", type=float, default=0.2)
+
+    position_actions = portfolio_sub.add_parser("actions", help="Build actionable position risk instructions")
+    position_actions.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    position_actions.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    position_actions.add_argument("--cash", type=float, default=100000)
+    position_actions.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    position_actions.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    position_actions.add_argument("--max-exposure-pct", type=float, default=0.8)
+    position_actions.add_argument("--max-position-pct", type=float, default=0.2)
+    position_actions.add_argument("--target-exposure-pct", type=float, help="Optional stricter target total exposure")
+    position_actions.add_argument("--format", choices=["json", "markdown"], default="json")
+    position_actions.add_argument("--output", type=Path, help="Optional output path")
+    position_actions.add_argument("--log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    position_actions.add_argument("--record", action="store_true", help="Append the generated action plan to the JSONL log")
+
+    exit_plan = portfolio_sub.add_parser("exit-plan", help="Build actionable sell/exit plans for current positions")
+    exit_plan.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    exit_plan.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    exit_plan.add_argument("--cash", type=float, default=100000)
+    exit_plan.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    exit_plan.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    exit_plan.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    exit_plan.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    exit_plan.add_argument("--max-position-pct", type=float, default=0.2)
+    exit_plan.add_argument("--max-holding-days", type=int, default=20)
+    exit_plan.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    exit_plan.add_argument("--profit-take-pct", type=float, default=0.5)
+    exit_plan.add_argument("--plan-date", help="Optional plan date, defaults to today")
+    exit_plan.add_argument("--lot-level", action="store_true", help="Generate one exit plan item per open buy lot")
+    exit_plan.add_argument("--format", choices=["json", "markdown"], default="json")
+    exit_plan.add_argument("--output", type=Path, help="Optional output path")
+    exit_plan.add_argument("--log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    exit_plan.add_argument("--record", action="store_true", help="Append the generated exit plan to the JSONL log")
 
     optimize = subparsers.add_parser("optimize", help="Strategy experiments and optimization tools")
     optimize_sub = optimize.add_subparsers(dest="optimize_command", required=True)
@@ -566,9 +797,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate_strategy = optimize_sub.add_parser("validate-strategy", help="Validate one strategy YAML")
     validate_strategy.add_argument("--config", type=Path, required=True, help="Strategy YAML path")
     validate_strategy.add_argument("--csv", type=Path, help="Optional OHLCV CSV for a smoke test")
+    validate_strategy.add_argument("--trade-plan-log", type=Path, help="Optional trade plan JSONL log for plan-pressure signals")
     validate_strategies = optimize_sub.add_parser("validate-strategies", help="Validate a directory of strategy YAML files")
     validate_strategies.add_argument("--dir", type=Path, default=Path("configs/strategies"), help="Strategy YAML directory")
     validate_strategies.add_argument("--csv", type=Path, help="Optional OHLCV CSV for a smoke test")
+    validate_strategies.add_argument("--trade-plan-log", type=Path, help="Optional trade plan JSONL log for plan-pressure signals")
     promote_strategy = optimize_sub.add_parser("promote-strategy", help="Export a promoted strategy and optionally backtest it")
     promote_strategy.add_argument("--summary", type=Path, required=True, help="Experiment summary JSON")
     promote_strategy.add_argument("--output", type=Path, required=True, help="Strategy YAML output path")
@@ -581,6 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
     promote_strategy.add_argument("--promotion-output", type=Path, help="Optional promotion result JSON")
     promote_strategy.add_argument("--promotion-log", type=Path, help="Optional promotion history JSONL")
     promote_strategy.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    promote_strategy.add_argument("--trade-plan-log", type=Path, help="Optional trade plan JSONL log for plan-pressure signals")
     strategy_health = optimize_sub.add_parser("health", help="Summarize strategy health from SQLite")
     strategy_health.add_argument("--sqlite", type=Path, default=Path("data/quant.sqlite"), help="SQLite store path")
     rotation = optimize_sub.add_parser("rotation", help="Rank strategies for rotation from health and constraints")
@@ -829,6 +1063,13 @@ def run_daily_report(args: argparse.Namespace) -> None:
     rotation_history = _rotation_history_from_args(args, limit=20)
     trade_records = _trade_records_from_args(args)
     trade_stats = summarize_trade_journal(trade_records)
+    trade_plan_summary = build_trade_plan_summary(_trade_plan_records_from_args(args), limit=5)
+    trade_plan_audit = summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=5)
+    action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=5)
+    exit_plan = _latest_exit_plan_from_args(args)
+    exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=5)
+    lot_exit_execution_summary = _lot_exit_execution_summary_from_args(args, trade_records=trade_records, limit=5)
+    lifecycle_snapshot = _position_lifecycle_snapshot_from_args(args, limit=5)
     gate_review = summarize_gate_journal(trade_records, limit=5)
     discipline_summary = _discipline_summary_from_args(args, limit=5)
     discipline_adherence = _discipline_adherence_summary_from_args(args, limit=5)
@@ -860,6 +1101,13 @@ def run_daily_report(args: argparse.Namespace) -> None:
             data_health=data_health,
             gate_review=gate_review,
             trade_stats=trade_stats,
+            trade_plan_summary=trade_plan_summary,
+            trade_plan_audit=trade_plan_audit,
+            action_execution_summary=action_execution_summary,
+            exit_plan=exit_plan,
+            exit_execution_summary=exit_execution_summary,
+            lot_exit_execution_summary=lot_exit_execution_summary,
+            lifecycle_snapshot=lifecycle_snapshot,
             discipline_summary=discipline_summary,
             discipline_adherence=discipline_adherence,
         )
@@ -905,6 +1153,13 @@ def run_weekly_report(args: argparse.Namespace) -> None:
     market_context = build_market_context(settings).to_dict()
     trade_records = _trade_records_from_args(args)
     trade_stats = summarize_trade_journal(trade_records)
+    trade_plan_summary = build_trade_plan_summary(_trade_plan_records_from_args(args), limit=10)
+    trade_plan_audit = summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=10)
+    action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=10)
+    exit_plan = _latest_exit_plan_from_args(args)
+    exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=10)
+    lot_exit_execution_summary = _lot_exit_execution_summary_from_args(args, trade_records=trade_records, limit=10)
+    lifecycle_snapshot = _position_lifecycle_snapshot_from_args(args, limit=10)
     gate_review = summarize_gate_journal(trade_records, limit=10)
     discipline_summary = _discipline_summary_from_args(args, limit=10)
     discipline_adherence = _discipline_adherence_summary_from_args(args, limit=10)
@@ -932,6 +1187,13 @@ def run_weekly_report(args: argparse.Namespace) -> None:
             notes=args.note,
             market_context=market_context,
             gate_review=gate_review,
+            trade_plan_summary=trade_plan_summary,
+            trade_plan_audit=trade_plan_audit,
+            action_execution_summary=action_execution_summary,
+            exit_plan=exit_plan,
+            exit_execution_summary=exit_execution_summary,
+            lot_exit_execution_summary=lot_exit_execution_summary,
+            lifecycle_snapshot=lifecycle_snapshot,
             discipline_summary=discipline_summary,
             discipline_adherence=discipline_adherence,
         )
@@ -1065,12 +1327,35 @@ def run_briefing_report(args: argparse.Namespace) -> None:
     prices = parse_price_overrides(args.price)
     stops = parse_price_overrides(args.stop)
     trade_records = _trade_records_from_args(args)
-    position_book = build_position_book(trade_records, cash=args.cash, prices=prices).to_dict()
-    holding_risk = check_holding_risk(
-        build_position_book(trade_records, cash=args.cash, prices=prices),
+    position_book_model = build_position_book(trade_records, cash=args.cash, prices=prices)
+    position_book = position_book_model.to_dict()
+    lot_book = build_lot_book(trade_records, prices=prices, as_of=getattr(args, "as_of", None)).to_dict()
+    holding_risk_model = check_holding_risk(
+        position_book_model,
         stops=stops,
         max_exposure_pct=args.max_exposure_pct,
         max_position_pct=args.max_position_pct,
+    )
+    holding_risk = holding_risk_model.to_dict()
+    holding_action_plan = build_position_action_plan(
+        position_book_model,
+        holding_risk_model,
+        stops=stops,
+        max_exposure_pct=args.max_exposure_pct,
+        max_position_pct=args.max_position_pct,
+        target_exposure_pct=float(allocation_plan.get("target_exposure_pct", 0) or 0),
+    ).to_dict()
+    exit_plan = build_exit_plan(
+        position_book_model,
+        trade_records=trade_records,
+        stops=stops,
+        targets=parse_price_overrides(getattr(args, "target", []) or []),
+        invalidated=parse_kv_pairs(getattr(args, "invalidate", []) or []),
+        max_position_pct=getattr(args, "max_position_pct", 0.2),
+        max_holding_days=getattr(args, "max_holding_days", 20),
+        time_stop_min_return_pct=getattr(args, "time_stop_min_return_pct", 0.0),
+        profit_take_pct=getattr(args, "profit_take_pct", 0.5),
+        plan_date=getattr(args, "as_of", None),
     ).to_dict()
     sectors = calculate_sector_strength(
         frame,
@@ -1102,6 +1387,12 @@ def run_briefing_report(args: argparse.Namespace) -> None:
     strategy_rotation = build_strategy_rotation(strategy_health, constraint_summary, promotion_summary)
     rotation_history = _rotation_history_from_args(args, limit=20)
     trade_stats = summarize_trade_journal(trade_records)
+    trade_plan_summary = build_trade_plan_summary(_trade_plan_records_from_args(args), limit=10)
+    trade_plan_audit = summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=10)
+    action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=10)
+    exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=10)
+    lot_exit_execution_summary = _lot_exit_execution_summary_from_args(args, trade_records=trade_records, limit=10)
+    lifecycle_snapshot = _position_lifecycle_snapshot_from_args(args, limit=10)
     gate_review = summarize_gate_journal(trade_records, limit=5)
     discipline_summary = _discipline_summary_from_args(args, limit=5)
     discipline_adherence = _discipline_adherence_summary_from_args(args, limit=5)
@@ -1121,7 +1412,9 @@ def run_briefing_report(args: argparse.Namespace) -> None:
             candidates=candidates.to_dict(orient="records"),
             allocation_plan=allocation_plan,
             position_book=position_book,
+            lot_book=lot_book,
             holding_risk=holding_risk,
+            holding_action_plan=holding_action_plan,
             dragon_candidates=dragon_candidates.to_dict(orient="records"),
             sectors=sectors,
             experiment_summary=experiment_summary,
@@ -1135,6 +1428,13 @@ def run_briefing_report(args: argparse.Namespace) -> None:
             data_health=data_health,
             gate_review=gate_review,
             trade_stats=trade_stats,
+            trade_plan_summary=trade_plan_summary,
+            trade_plan_audit=trade_plan_audit,
+            action_execution_summary=action_execution_summary,
+            exit_plan=exit_plan,
+            exit_execution_summary=exit_execution_summary,
+            lot_exit_execution_summary=lot_exit_execution_summary,
+            lifecycle_snapshot=lifecycle_snapshot,
             discipline_summary=discipline_summary,
         )
     )
@@ -1163,13 +1463,20 @@ def run_premarket_report(args: argparse.Namespace, *, print_path: bool = True, c
             allocation_plan=context["allocation_plan"],
             pretrade_checks=context["pretrade_checks"],
             position_book=context["position_book"],
+            lot_book=context.get("lot_book"),
             holding_risk=context["holding_risk"],
+            holding_action_plan=context.get("holding_action_plan"),
+            exit_plan=context.get("exit_plan"),
             strategy_health=context["strategy_health"],
             constraint_summary=context["constraint_summary"],
             strategy_rotation=context["strategy_rotation"],
             rotation_history=context["rotation_history"],
             gate_review=context.get("gate_review"),
             trade_stats=context.get("trade_stats"),
+            action_execution_summary=context.get("action_execution_summary"),
+            exit_execution_summary=context.get("exit_execution_summary"),
+            lot_exit_execution_summary=context.get("lot_exit_execution_summary"),
+            lifecycle_snapshot=context.get("lifecycle_snapshot"),
             discipline_summary=context.get("discipline_summary"),
             discipline_adherence=context.get("discipline_adherence"),
         )
@@ -1225,12 +1532,35 @@ def _premarket_context_from_args(
     prices = parse_price_overrides(args.price)
     stops = parse_price_overrides(args.stop)
     trade_records = _trade_records_from_args(args)
-    position_book = build_position_book(trade_records, cash=args.cash, prices=prices).to_dict()
-    holding_risk = check_holding_risk(
-        build_position_book(trade_records, cash=args.cash, prices=prices),
+    position_book_model = build_position_book(trade_records, cash=args.cash, prices=prices)
+    position_book = position_book_model.to_dict()
+    lot_book = build_lot_book(trade_records, prices=prices, as_of=getattr(args, "as_of", None)).to_dict()
+    holding_risk_model = check_holding_risk(
+        position_book_model,
         stops=stops,
         max_exposure_pct=args.max_exposure_pct,
         max_position_pct=args.max_position_pct,
+    )
+    holding_risk = holding_risk_model.to_dict()
+    holding_action_plan = build_position_action_plan(
+        position_book_model,
+        holding_risk_model,
+        stops=stops,
+        max_exposure_pct=args.max_exposure_pct,
+        max_position_pct=args.max_position_pct,
+        target_exposure_pct=float(allocation_plan.get("target_exposure_pct", 0) or 0),
+    ).to_dict()
+    exit_plan = build_exit_plan(
+        position_book_model,
+        trade_records=trade_records,
+        stops=stops,
+        targets=parse_price_overrides(getattr(args, "target", []) or []),
+        invalidated=parse_kv_pairs(getattr(args, "invalidate", []) or []),
+        max_position_pct=getattr(args, "max_position_pct", 0.2),
+        max_holding_days=getattr(args, "max_holding_days", 20),
+        time_stop_min_return_pct=getattr(args, "time_stop_min_return_pct", 0.0),
+        profit_take_pct=getattr(args, "profit_take_pct", 0.5),
+        plan_date=getattr(args, "as_of", None),
     ).to_dict()
     market_context = build_market_context(settings).to_dict()
     if data_health is None:
@@ -1247,6 +1577,19 @@ def _premarket_context_from_args(
     rotation_history = _rotation_history_from_args(args, limit=20)
     trade_stats = summarize_trade_journal(trade_records)
     gate_review = summarize_gate_journal(trade_records, limit=5)
+    action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=5)
+    exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=5)
+    lot_exit_execution_summary = _lot_exit_execution_summary_from_args(args, trade_records=trade_records, limit=5)
+    lifecycle_snapshot = build_position_lifecycle_snapshot(
+        trade_plan_summary=build_trade_plan_summary(_trade_plan_records_from_args(args), limit=5),
+        lot_book=lot_book,
+        holding_action_plan=holding_action_plan,
+        exit_plan=exit_plan,
+        trade_plan_audit=summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=5),
+        action_execution_summary=action_execution_summary,
+        exit_execution_summary=exit_execution_summary,
+        lot_exit_execution_summary=lot_exit_execution_summary,
+    )
     discipline_summary = _discipline_summary_from_args(args, limit=5)
     discipline_adherence = _discipline_adherence_summary_from_args(args, limit=5)
     pretrade_checks = _pretrade_preview_from_report_inputs(
@@ -1266,13 +1609,20 @@ def _premarket_context_from_args(
         "allocation_plan": allocation_plan,
         "pretrade_checks": pretrade_checks,
         "position_book": position_book,
+        "lot_book": lot_book,
         "holding_risk": holding_risk,
+        "holding_action_plan": holding_action_plan,
+        "exit_plan": exit_plan,
         "strategy_health": strategy_health,
         "constraint_summary": constraint_summary,
         "strategy_rotation": strategy_rotation,
         "rotation_history": rotation_history,
         "gate_review": gate_review,
         "trade_stats": trade_stats,
+        "action_execution_summary": action_execution_summary,
+        "exit_execution_summary": exit_execution_summary,
+        "lot_exit_execution_summary": lot_exit_execution_summary,
+        "lifecycle_snapshot": lifecycle_snapshot,
         "discipline_summary": discipline_summary,
         "discipline_adherence": discipline_adherence,
     }
@@ -1355,6 +1705,12 @@ def run_workflow_premarket(args: argparse.Namespace) -> None:
 
     run_premarket_report(args, print_path=False, context=context)
     summary["steps"].append({"name": "premarket_report", "status": "ok", "path": str(args.output)})
+    if getattr(args, "record_actions", False):
+        append_position_action_plan_record(args.action_log, context.get("holding_action_plan") or {})
+        summary["steps"].append({"name": "holding_action_plan", "status": "ok", "path": str(args.action_log)})
+    if getattr(args, "record_exit_plan", False):
+        append_exit_plan_record(args.exit_log, context.get("exit_plan") or {})
+        summary["steps"].append({"name": "exit_plan", "status": "ok", "path": str(args.exit_log)})
     if getattr(args, "record_discipline", False):
         _persist_discipline_from_args(
             args,
@@ -1374,6 +1730,10 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
     pretrade_checks = list(context.get("pretrade_checks", []) or [])
     pretrade_statuses = [str(item.get("status", "") or "") for item in pretrade_checks]
     holding_status = str((context.get("holding_risk") or {}).get("status", "pass") or "pass")
+    holding_action_plan = context.get("holding_action_plan") or {}
+    holding_action_status = str(holding_action_plan.get("status", "pass") or "pass")
+    exit_plan = context.get("exit_plan") or {}
+    exit_plan_status = str(exit_plan.get("status", "pass") or "pass")
     regime = str((context.get("market_temperature") or {}).get("regime", "") or "")
 
     if health.get("status") == "fail":
@@ -1385,6 +1745,12 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
     if holding_status == "block":
         status = "block"
         reasons.append("持仓风险存在阻断项")
+    if holding_action_status == "block":
+        status = "block"
+        reasons.append("持仓动作计划存在阻断项")
+    if exit_plan_status == "block":
+        status = "block"
+        reasons.append("Exit plan contains blocking sell tasks.")
     if regime in {"frozen", "empty"}:
         status = "block"
         reasons.append(f"市场状态为 {regime}")
@@ -1402,6 +1768,12 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
         if holding_status == "warn":
             status = "warn"
             reasons.append("持仓风险存在预警项")
+        if holding_action_status == "warn":
+            status = "warn"
+            reasons.append("持仓动作计划存在预警项")
+        if exit_plan_status == "warn":
+            status = "warn"
+            reasons.append("Exit plan has warning-level sell tasks.")
         if regime == "cold":
             status = "warn"
             reasons.append("市场温度偏冷")
@@ -1421,6 +1793,19 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
             "block": pretrade_statuses.count("block"),
         },
         "holding_status": holding_status,
+        "holding_action_status": holding_action_status,
+        "exit_plan_status": exit_plan_status,
+        "holding_actions": {
+            "exit_count": int(holding_action_plan.get("exit_count", 0) or 0),
+            "reduce_count": int(holding_action_plan.get("reduce_count", 0) or 0),
+            "watch_count": int(holding_action_plan.get("watch_count", 0) or 0),
+        },
+        "exit_plan": {
+            "sell_all_count": int(exit_plan.get("sell_all_count", 0) or 0),
+            "take_profit_count": int(exit_plan.get("take_profit_count", 0) or 0),
+            "reduce_count": int(exit_plan.get("reduce_count", 0) or 0),
+            "time_stop_count": int(exit_plan.get("time_stop_count", 0) or 0),
+        },
         "market_regime": regime,
     }
 
@@ -1843,6 +2228,9 @@ def run_review_selections(args: argparse.Namespace) -> None:
 def run_review_trade_add(args: argparse.Namespace) -> None:
     tags = [item.strip() for item in args.tags.split(",") if item.strip()]
     gate = _gate_context_from_trade_args(args)
+    trade_plan = _trade_plan_from_args(args)
+    if trade_plan:
+        tags.extend(_trade_plan_tags(trade_plan))
     if gate.get("status") in {"warn", "block"}:
         tag = f"gate-{gate['status']}"
         if tag not in tags:
@@ -1859,20 +2247,20 @@ def run_review_trade_add(args: argparse.Namespace) -> None:
         name=args.name,
         strategy=args.strategy,
         market_regime=args.market_regime,
-        planned_pct=args.planned_pct,
+        planned_pct=_trade_plan_number(trade_plan, "planned_pct", args.planned_pct),
         actual_pct=args.actual_pct,
-        planned_price=args.planned_price,
-        stop_price=args.stop_price,
-        target_price=args.target_price,
+        planned_price=_trade_plan_number(trade_plan, "entry_price", args.planned_price),
+        stop_price=_trade_plan_number(trade_plan, "stop_price", args.stop_price),
+        target_price=_trade_plan_number(trade_plan, "target_price", args.target_price),
         tags=tags,
         mistake_type=args.mistake_type,
         review=args.review,
-        gate_status=str(gate.get("status", "")),
-        gate_message=str(gate.get("message", "")),
+        gate_status=str((trade_plan or {}).get("gate_status", gate.get("status", ""))),
+        gate_message=str((trade_plan or {}).get("gate_reason", gate.get("message", ""))),
         gate_reasons=list(gate.get("reasons", []) or []),
         workflow_summary=str(getattr(args, "workflow_summary", "") or ""),
-        discipline_exception=bool(getattr(args, "discipline_exception", False)),
-        exception_reason=str(getattr(args, "exception_reason", "") or ""),
+        discipline_exception=bool((trade_plan or {}).get("discipline_exception", getattr(args, "discipline_exception", False))),
+        exception_reason=str((trade_plan or {}).get("exception_reason", getattr(args, "exception_reason", "")) or ""),
     )
     TradeJournal(args.journal, sqlite_path=getattr(args, "sqlite", None)).add(entry)
     print(json.dumps(entry.to_record(), ensure_ascii=False, indent=2))
@@ -1933,6 +2321,276 @@ def run_review_exceptions(args: argparse.Namespace) -> None:
         print(str(args.output))
         return
     print(text)
+
+
+def run_review_trade_plan(args: argparse.Namespace) -> None:
+    records = _trade_plan_records_from_args(args)
+    summary = summarize_trade_plan_records(records, limit=getattr(args, "limit", 20))
+    if getattr(args, "format", "json") == "markdown":
+        text = render_trade_plan_summary_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_trade_audit(args: argparse.Namespace) -> None:
+    plan_records = _trade_plan_records_from_args(args)
+    trade_records = _trade_records_from_args(args)
+    summary = summarize_trade_plan_audit(plan_records, trade_records, limit=getattr(args, "limit", 20))
+    if getattr(args, "format", "json") == "markdown":
+        text = render_trade_plan_audit_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_action_execution(args: argparse.Namespace) -> None:
+    action_records = read_position_action_plan_records(args.action_log)
+    trade_records = _trade_records_from_args(args)
+    summary = summarize_action_execution(
+        action_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 3),
+        limit=getattr(args, "limit", 20),
+    )
+    if getattr(args, "format", "json") == "markdown":
+        text = render_action_execution_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_exit_audit(args: argparse.Namespace) -> None:
+    exit_records = read_exit_plan_records(args.exit_log)
+    trade_records = _trade_records_from_args(args)
+    summary = summarize_exit_execution(
+        exit_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 3),
+        limit=getattr(args, "limit", 20),
+    )
+    if getattr(args, "format", "json") == "markdown":
+        text = render_exit_execution_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_lot_stats(args: argparse.Namespace) -> None:
+    prices = parse_price_overrides(getattr(args, "price", []) or [])
+    records = _trade_records_from_args(args)
+    book = build_lot_book(records, prices=prices, as_of=getattr(args, "as_of", None))
+    text = render_lot_book_markdown(book) if getattr(args, "format", "json") == "markdown" else json.dumps(book.to_dict(), ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_lot_exit_audit(args: argparse.Namespace) -> None:
+    exit_records = read_exit_plan_records(args.exit_log)
+    trade_records = _trade_records_from_args(args)
+    summary = summarize_lot_exit_execution(
+        exit_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 3),
+        limit=getattr(args, "limit", 20),
+    )
+    if getattr(args, "format", "json") == "markdown":
+        text = render_lot_exit_execution_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_lifecycle(args: argparse.Namespace) -> None:
+    snapshot = _position_lifecycle_snapshot_from_args(args, limit=getattr(args, "limit", 20))
+    text = render_position_lifecycle_markdown(snapshot) if getattr(args, "format", "json") == "markdown" else json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_portfolio_plan(args: argparse.Namespace) -> None:
+    frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
+    strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
+    candidates = strategy.screen(frame)
+    candidates = enrich_and_score_candidates(
+        frame,
+        candidates,
+        settings.scoring.weights,
+        sector_column=args.sector_column,
+        sector_top=args.sector_top,
+        only_top_sectors=args.only_top_sectors,
+    )
+    if args.top:
+        candidates = candidates.head(args.top)
+    temperature = calculate_market_temperature(frame, candidates).to_dict()
+    allocation_plan = build_allocation_plan(
+        candidates,
+        temperature,
+        cash=args.cash,
+        max_positions=args.top,
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=_current_strategy_health(args),
+    )
+    result = run_pretrade_check(
+        candidates,
+        temperature,
+        symbol=args.symbol,
+        entry_price=args.entry_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        stop_price=args.stop_price,
+        target_price=args.target_price,
+        max_positions=args.top,
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=_current_strategy_health(args),
+    )
+    plan = build_trade_plan(
+        symbol=args.symbol,
+        trade_date=getattr(args, "trade_date", None),
+        pretrade_result=result,
+        allocation_plan=allocation_plan,
+        discipline_exception=bool(getattr(args, "discipline_exception", False)),
+        exception_reason=str(getattr(args, "exception_reason", "") or ""),
+    )
+    persist_constraint_audit(
+        build_constraint_audit_record("portfolio.plan", plan.strategy_constraint),
+        log_path=getattr(args, "constraint_log", None),
+        sqlite_path=getattr(args, "sqlite", None),
+    )
+    payload = plan.to_dict()
+    if getattr(args, "record", False):
+        append_jsonl(getattr(args, "log", Path("data/review/trade_plans.jsonl")), payload)
+    rendered = render_trade_plan_markdown(plan) if getattr(args, "format", "json") == "markdown" else json.dumps(payload, ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(rendered)
+
+
+def run_portfolio_plan_batch(args: argparse.Namespace) -> None:
+    frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
+    strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
+    candidates = strategy.screen(frame)
+    candidates = enrich_and_score_candidates(
+        frame,
+        candidates,
+        settings.scoring.weights,
+        sector_column=args.sector_column,
+        sector_top=args.sector_top,
+        only_top_sectors=args.only_top_sectors,
+    )
+    if args.top:
+        candidates = candidates.head(args.top)
+    temperature = calculate_market_temperature(frame, candidates).to_dict()
+    batch = build_trade_plan_batch(
+        candidates=candidates,
+        market_temperature=temperature,
+        cash=args.cash,
+        max_positions=args.top,
+        strategy_health=_current_strategy_health(args),
+        trade_date=getattr(args, "trade_date", None),
+        discipline_exception=bool(getattr(args, "discipline_exception", False)),
+        exception_reason=str(getattr(args, "exception_reason", "") or ""),
+    )
+    persist_constraint_audit(
+        build_constraint_audit_record("portfolio.plan-batch", {"strategy": batch.strategy, "status": batch.status}),
+        log_path=getattr(args, "constraint_log", None),
+        sqlite_path=getattr(args, "sqlite", None),
+    )
+    payload = batch.to_dict()
+    if getattr(args, "record", False):
+        for plan in batch.plans:
+            append_trade_plan_record(getattr(args, "log", Path("data/review/trade_plans.jsonl")), plan)
+    rendered = render_trade_plan_batch_markdown(batch) if getattr(args, "format", "json") == "markdown" else json.dumps(payload, ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(rendered)
+
+
+def _trade_plan_from_args(args: argparse.Namespace) -> dict | None:
+    path = getattr(args, "trade_plan", None)
+    if not path:
+        return None
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _trade_plan_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_trade_records(args.sqlite)
+    path = (
+        getattr(args, "plan_log", None)
+        or getattr(args, "trade_plan_log", None)
+        or getattr(args, "log", None)
+        or Path("data/review/trade_plans.jsonl")
+    )
+    return read_trade_plan_records(path)
+
+
+def _trade_plan_number(plan: dict | None, key: str, fallback: float | None) -> float | None:
+    if plan and key in plan and plan.get(key) not in (None, ""):
+        return float(plan.get(key))
+    return fallback
+
+
+def _trade_plan_tags(plan: dict | None) -> list[str]:
+    if not plan:
+        return []
+    tags = ["trade-plan"]
+    if str(plan.get("gate_status", "") or "") in {"warn", "block"}:
+        tags.append(f"plan-{plan.get('gate_status')}")
+    if plan.get("discipline_exception"):
+        tags.append("discipline-exception")
+    return tags
 
 
 def _filter_gate_records(records: list[dict], *, strategy: str = "", symbol: str = "") -> list[dict]:
@@ -2095,7 +2753,8 @@ def _sqlite_discipline_records(sqlite_path: Path) -> list[dict]:
 def _trade_records_from_args(args: argparse.Namespace) -> list[dict]:
     if getattr(args, "sqlite", None):
         return _sqlite_trade_records(args.sqlite)
-    return TradeJournal(getattr(args, "journal", None) or Path("data/review/trades.jsonl")).list()
+    path = getattr(args, "trade_log", None) or getattr(args, "journal", None) or Path("data/review/trades.jsonl")
+    return TradeJournal(path).list()
 
 
 def _discipline_records_from_args(args: argparse.Namespace) -> list[dict]:
@@ -2137,18 +2796,48 @@ def _promotion_records_from_args(args: argparse.Namespace) -> list[dict]:
     return read_promotion_records(path)
 
 
+def _trade_plan_pressure_from_args(args: argparse.Namespace) -> dict[str, float | int]:
+    path = getattr(args, "trade_plan_log", None)
+    if not path:
+        return {}
+    records = read_trade_plan_records(path)
+    if not records:
+        return {}
+    pressure = summarize_trade_plan_audit(records, _trade_records_from_args(args), limit=20)
+    return {
+        "total_plans": int(pressure.get("total_plans", 0) or 0),
+        "match_rate": float(pressure.get("match_rate", 0) or 0),
+        "unmatched_plans": int(pressure.get("unmatched_plans", 0) or 0),
+        "orphan_trades": int(pressure.get("orphan_trades", 0) or 0),
+        "avg_price_deviation_pct": float(pressure.get("avg_price_deviation_pct", 0) or 0),
+    }
+
+
 def _strategy_health_from_args(args: argparse.Namespace) -> list[dict]:
-    if not getattr(args, "sqlite", None):
+    selections = _selection_records_from_args(args)
+    trades = _trade_records_from_args(args)
+    promotions = _promotion_records_from_args(args)
+    if not (selections or trades or promotions):
         return []
-    constraint_records = _sqlite_constraint_records(args.sqlite)
+    audit_map = _trade_plan_audit_by_strategy_from_args(args)
+    lifecycle_snapshot = _position_lifecycle_snapshot_from_args(args, limit=20)
+    lifecycle_pressure = build_lifecycle_pressure(lifecycle_snapshot)
+    strategy_health = summarize_strategy_health(
+        selections,
+        trades,
+        promotions,
+        trade_plan_audits=audit_map,
+        lifecycle_pressure=lifecycle_pressure,
+    )
+    constraint_records = _constraint_records_from_args(args)
     policy = settings_from_args(args).risk.constraint_policy
     return [
-        apply_constraint_policy_to_health(item.to_dict(), constraint_records, **policy.kwargs_for(item.strategy))
-        for item in summarize_strategy_health(
-            _sqlite_selection_records(args.sqlite),
-            _sqlite_trade_records(args.sqlite),
-            _sqlite_promotion_records(args.sqlite),
+        apply_constraint_policy_to_health(
+            item.to_dict(),
+            constraint_records,
+            **policy.kwargs_for(item.strategy),
         )
+        for item in strategy_health
     ]
 
 
@@ -2269,6 +2958,107 @@ def _constraint_records_from_args(args: argparse.Namespace) -> list[dict]:
         return _sqlite_constraint_records(sqlite_path)
     path = getattr(args, "constraint_log", None) or Path("data/review/strategy_constraints.jsonl")
     return read_constraint_audit_records(path)
+
+
+def _selection_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_selection_records(args.sqlite)
+    tracker = getattr(args, "tracker", None) or Path("data/review/selections.jsonl")
+    return SelectionTracker(tracker).history()
+
+
+def _trade_plan_audit_by_strategy_from_args(args: argparse.Namespace) -> dict[str, dict]:
+    plan_records = _trade_plan_records_from_args(args)
+    trade_records = _trade_records_from_args(args)
+    if not plan_records or not trade_records:
+        return {}
+    return summarize_trade_plan_audit(plan_records, trade_records, limit=20).get("by_strategy", {}) or {}
+
+
+def _action_execution_summary_from_args(
+    args: argparse.Namespace,
+    *,
+    trade_records: list[dict] | None = None,
+    limit: int = 10,
+) -> dict | None:
+    action_log = getattr(args, "action_log", None)
+    if not action_log:
+        return None
+    records = read_position_action_plan_records(action_log)
+    if not records:
+        return None
+    trades = trade_records if trade_records is not None else _trade_records_from_args(args)
+    return summarize_action_execution(records, trades, lookahead_days=getattr(args, "lookahead_days", 3), limit=limit)
+
+
+def _latest_exit_plan_from_args(args: argparse.Namespace) -> dict | None:
+    exit_log = getattr(args, "exit_log", None)
+    if not exit_log:
+        return None
+    records = read_exit_plan_records(exit_log)
+    if not records:
+        return None
+    return records[-1]
+
+
+def _exit_execution_summary_from_args(
+    args: argparse.Namespace,
+    *,
+    trade_records: list[dict] | None = None,
+    limit: int = 10,
+) -> dict | None:
+    exit_log = getattr(args, "exit_log", None)
+    if not exit_log:
+        return None
+    records = read_exit_plan_records(exit_log)
+    if not records:
+        return None
+    trades = trade_records if trade_records is not None else _trade_records_from_args(args)
+    return summarize_exit_execution(records, trades, lookahead_days=getattr(args, "lookahead_days", 3), limit=limit)
+
+
+def _lot_exit_execution_summary_from_args(
+    args: argparse.Namespace,
+    *,
+    trade_records: list[dict] | None = None,
+    limit: int = 10,
+) -> dict | None:
+    exit_log = getattr(args, "exit_log", None)
+    if not exit_log:
+        return None
+    records = read_exit_plan_records(exit_log)
+    if not records:
+        return None
+    trades = trade_records if trade_records is not None else _trade_records_from_args(args)
+    return summarize_lot_exit_execution(records, trades, lookahead_days=getattr(args, "lookahead_days", 3), limit=limit)
+
+
+def _position_lifecycle_snapshot_from_args(args: argparse.Namespace, *, limit: int = 20) -> dict:
+    prices = parse_price_overrides(getattr(args, "price", []) or [])
+    trade_records = _trade_records_from_args(args)
+    lot_book = build_lot_book(trade_records, prices=prices, as_of=getattr(args, "as_of", None)).to_dict()
+    trade_plan_summary = build_trade_plan_summary(_trade_plan_records_from_args(args), limit=limit)
+    action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=limit)
+    exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=limit)
+    lot_exit_execution_summary = _lot_exit_execution_summary_from_args(args, trade_records=trade_records, limit=limit)
+    holding_action_plan = None
+    action_log = getattr(args, "action_log", None)
+    if action_log:
+        action_records = read_position_action_plan_records(action_log)
+        if action_records:
+            holding_action_plan = action_records[-1]
+    exit_plan = _latest_exit_plan_from_args(args)
+    trade_plan_audit = summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=limit)
+    return build_position_lifecycle_snapshot(
+        trade_plan_summary=trade_plan_summary,
+        lot_book=lot_book,
+        holding_action_plan=holding_action_plan,
+        exit_plan=exit_plan,
+        trade_plan_audit=trade_plan_audit,
+        action_execution_summary=action_execution_summary,
+        exit_execution_summary=exit_execution_summary,
+        lot_exit_execution_summary=lot_exit_execution_summary,
+    )
 
 
 def _constraint_policy_kwargs_from_args(args: argparse.Namespace) -> dict:
@@ -2454,6 +3244,33 @@ def run_portfolio_positions(args: argparse.Namespace) -> None:
     book = build_position_book(records, cash=args.cash, prices=prices)
     print(json.dumps(book.to_dict(), ensure_ascii=False, indent=2))
 
+
+def run_portfolio_lots(args: argparse.Namespace) -> None:
+    prices = parse_price_overrides(getattr(args, "price", []) or [])
+    records = _trade_records_from_args(args)
+    book = build_lot_book(records, prices=prices, as_of=getattr(args, "as_of", None))
+    if getattr(args, "record", False):
+        append_lot_book_record(getattr(args, "log", Path("data/review/lot_books.jsonl")), book)
+    text = render_lot_book_markdown(book) if getattr(args, "format", "json") == "markdown" else json.dumps(book.to_dict(), ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_portfolio_lifecycle(args: argparse.Namespace) -> None:
+    snapshot = _position_lifecycle_snapshot_from_args(args, limit=getattr(args, "limit", 20))
+    text = render_position_lifecycle_markdown(snapshot) if getattr(args, "format", "json") == "markdown" else json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
 def run_portfolio_risk(args: argparse.Namespace) -> None:
     prices = parse_price_overrides(args.price)
     stops = parse_price_overrides(args.stop)
@@ -2466,6 +3283,86 @@ def run_portfolio_risk(args: argparse.Namespace) -> None:
         max_position_pct=args.max_position_pct,
     )
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+
+
+def run_portfolio_actions(args: argparse.Namespace) -> None:
+    prices = parse_price_overrides(args.price)
+    stops = parse_price_overrides(args.stop)
+    records = _trade_records_from_args(args)
+    book = build_position_book(records, cash=args.cash, prices=prices)
+    risk_report = check_holding_risk(
+        book,
+        stops=stops,
+        max_exposure_pct=args.max_exposure_pct,
+        max_position_pct=args.max_position_pct,
+    )
+    action_plan = build_position_action_plan(
+        book,
+        risk_report,
+        stops=stops,
+        max_exposure_pct=args.max_exposure_pct,
+        max_position_pct=args.max_position_pct,
+        target_exposure_pct=getattr(args, "target_exposure_pct", None),
+    )
+    if getattr(args, "record", False):
+        append_position_action_plan_record(getattr(args, "log", Path("data/review/position_actions.jsonl")), action_plan)
+    if getattr(args, "format", "json") == "markdown":
+        text = "\n".join(render_position_action_plan_lines(action_plan))
+    else:
+        text = json.dumps(action_plan.to_dict(), ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_portfolio_exit_plan(args: argparse.Namespace) -> None:
+    prices = parse_price_overrides(getattr(args, "price", []) or [])
+    stops = parse_price_overrides(getattr(args, "stop", []) or [])
+    targets = parse_price_overrides(getattr(args, "target", []) or [])
+    invalidated = parse_kv_pairs(getattr(args, "invalidate", []) or [])
+    records = _trade_records_from_args(args)
+    book = build_position_book(records, cash=args.cash, prices=prices)
+    if getattr(args, "lot_level", False):
+        lot_book = build_lot_book(records, prices=prices, as_of=getattr(args, "plan_date", None)).to_dict()
+        plan = build_lot_exit_plan(
+            lot_book,
+            stops=stops,
+            targets=targets,
+            invalidated=invalidated,
+            max_holding_days=getattr(args, "max_holding_days", 20),
+            time_stop_min_return_pct=getattr(args, "time_stop_min_return_pct", 0.0),
+            profit_take_pct=getattr(args, "profit_take_pct", 0.5),
+            plan_date=getattr(args, "plan_date", None),
+        )
+    else:
+        plan = build_exit_plan(
+            book,
+            trade_records=records,
+            stops=stops,
+            targets=targets,
+            invalidated=invalidated,
+            max_position_pct=getattr(args, "max_position_pct", 0.2),
+            max_holding_days=getattr(args, "max_holding_days", 20),
+            time_stop_min_return_pct=getattr(args, "time_stop_min_return_pct", 0.0),
+            profit_take_pct=getattr(args, "profit_take_pct", 0.5),
+            plan_date=getattr(args, "plan_date", None),
+        )
+    if getattr(args, "record", False):
+        append_exit_plan_record(getattr(args, "log", Path("data/review/exit_plans.jsonl")), plan)
+    if getattr(args, "format", "json") == "markdown":
+        text = render_exit_plan_markdown(plan)
+    else:
+        text = json.dumps(plan.to_dict(), ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
 
 def parse_price_overrides(items: list[str]) -> dict[str, float]:
     prices: dict[str, float] = {}
@@ -2536,14 +3433,16 @@ def run_optimize_export_strategy(args: argparse.Namespace) -> None:
 
 def run_optimize_validate_strategy(args: argparse.Namespace) -> None:
     frame = read_ohlcv_csv(args.csv) if args.csv else None
-    result = validate_strategy_config(args.config, frame=frame)
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
+    result = validate_strategy_config(args.config, frame=frame, trade_plan_pressure=_trade_plan_pressure_from_args(args))
+    payload = result.to_dict()
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     if not result.ok:
         raise SystemExit(1)
 
 def run_optimize_validate_strategies(args: argparse.Namespace) -> None:
     frame = read_ohlcv_csv(args.csv) if args.csv else None
-    results = validate_strategy_directory(args.dir, frame=frame)
+    pressure = _trade_plan_pressure_from_args(args)
+    results = validate_strategy_directory(args.dir, frame=frame, trade_plan_pressure=pressure)
     payload = {
         "ok": all(item.ok for item in results),
         "count": len(results),
@@ -2564,6 +3463,7 @@ def run_optimize_promote_strategy(args: argparse.Namespace) -> None:
         backtest=args.backtest,
         buy_price_field=args.buy_price,
         cash=args.cash,
+        trade_plan_pressure=_trade_plan_pressure_from_args(args),
     )
     payload = result.to_dict()
     text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
@@ -2717,6 +3617,18 @@ def main() -> None:
             run_review_trade_list(args)
         elif args.review_command == "trade-stats":
             run_review_trade_stats(args)
+        elif args.review_command == "trade-audit":
+            run_review_trade_audit(args)
+        elif args.review_command == "action-execution":
+            run_review_action_execution(args)
+        elif args.review_command == "exit-audit":
+            run_review_exit_audit(args)
+        elif args.review_command == "lot-stats":
+            run_review_lot_stats(args)
+        elif args.review_command == "lot-exit-audit":
+            run_review_lot_exit_audit(args)
+        elif args.review_command == "lifecycle":
+            run_review_lifecycle(args)
         elif args.review_command == "gates":
             run_review_gates(args)
         elif args.review_command == "exceptions":
@@ -2739,10 +3651,22 @@ def main() -> None:
             run_portfolio_allocate(args)
         elif args.portfolio_command == "precheck":
             run_portfolio_precheck(args)
+        elif args.portfolio_command == "plan":
+            run_portfolio_plan(args)
+        elif args.portfolio_command == "plan-batch":
+            run_portfolio_plan_batch(args)
         elif args.portfolio_command == "positions":
             run_portfolio_positions(args)
+        elif args.portfolio_command == "lots":
+            run_portfolio_lots(args)
+        elif args.portfolio_command == "lifecycle":
+            run_portfolio_lifecycle(args)
         elif args.portfolio_command == "risk":
             run_portfolio_risk(args)
+        elif args.portfolio_command == "actions":
+            run_portfolio_actions(args)
+        elif args.portfolio_command == "exit-plan":
+            run_portfolio_exit_plan(args)
     elif args.command == "optimize":
         if args.optimize_command == "experiments":
             run_optimize_experiments(args)

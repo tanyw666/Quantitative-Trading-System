@@ -5,6 +5,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from quant_system.reports.trade_plan_pressure import format_trade_plan_pressure, normalize_trade_plan_pressure
+
 
 def read_rotation_snapshots(snapshot_dir: Path, limit: int = 20) -> list[dict[str, Any]]:
     if not snapshot_dir.exists():
@@ -37,6 +39,7 @@ def summarize_rotation_history(snapshots: list[dict[str, Any]]) -> dict[str, Any
     for strategy, rows in by_strategy.items():
         scores = [float(row.get("rotation_score", 0) or 0) for row in rows]
         priorities = [str(row.get("priority", "") or "") for row in rows]
+        match_rates = [float(row.get("trade_plan_match_rate")) for row in rows if row.get("trade_plan_match_rate") not in (None, "")]
         strategies.append(
             {
                 "strategy": strategy,
@@ -49,6 +52,8 @@ def summarize_rotation_history(snapshots: list[dict[str, Any]]) -> dict[str, Any
                 "light_count": priorities.count("轻仓"),
                 "pause_count": priorities.count("暂停"),
                 "latest_action": rows[-1].get("action", "") if rows else "",
+                "avg_trade_plan_match_rate": round(sum(match_rates) / len(match_rates), 3) if match_rates else None,
+                "low_trade_plan_match_count": sum(1 for rate in match_rates if rate < 0.85),
             }
         )
 
@@ -75,10 +80,12 @@ def render_rotation_history_lines(summary: dict[str, Any] | None) -> list[str]:
         f"- 快照数量：{int(summary.get('snapshot_count', 0))}",
         f"- 覆盖区间：{summary.get('first_created_at', '')} 至 {summary.get('latest_created_at', '')}",
         "",
-        "| 策略 | 样本 | 平均轮换分 | 最新分 | 趋势 | 主打 | 暂停 | 最新动作 |",
-        "| --- | ---: | ---: | ---: | --- | ---: | ---: | --- |",
+        "| 策略 | 样本 | 平均轮换分 | 最新分 | 趋势 | 主打 | 暂停 | 最新动作 | 计划命中 |",
+        "| --- | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: |",
     ]
     for item in summary.get("strategies", []) or []:
+        pressure = normalize_trade_plan_pressure(item)
+        pressure_text = format_trade_plan_pressure(pressure) if pressure else "-"
         lines.append(
             f"| {item.get('strategy', '')} | "
             f"{int(item.get('snapshot_count', 0))} | "
@@ -87,7 +94,8 @@ def render_rotation_history_lines(summary: dict[str, Any] | None) -> list[str]:
             f"{_trend_label(str(item.get('trend', '')))} | "
             f"{int(item.get('main_count', 0))} | "
             f"{int(item.get('pause_count', 0))} | "
-            f"{item.get('latest_action', '')} |"
+            f"{item.get('latest_action', '')} | "
+            f"{pressure_text} |"
         )
     return lines
 
@@ -117,6 +125,15 @@ def render_rotation_history_card_lines(summary: dict[str, Any] | None, limit: in
             f"平均轮换分 {float(leader.get('avg_rotation_score', 0)):.1f}，"
             f"趋势 {_trend_label(str(leader.get('trend', '')))}。"
         )
+        low_match = sorted(
+            [item for item in strategies if int(item.get("low_trade_plan_match_count", 0) or 0)],
+            key=lambda item: (
+                -int(item.get("low_trade_plan_match_count", 0) or 0),
+                str(item.get("strategy", "")),
+            ),
+        )[:limit]
+        if low_match:
+            lines.append(f"- 计划失配偏多：{_strategy_list(low_match, count_key='low_trade_plan_match_count')}")
     return lines
 
 
@@ -145,4 +162,4 @@ def _strategy_list(items: list[dict[str, Any]], count_key: str | None = None) ->
             values.append(f"{strategy}({int(item.get(count_key, 0) or 0)})")
         else:
             values.append(f"{strategy}({float(item.get('latest_rotation_score', 0) or 0):.1f})")
-    return "、".join(values)
+    return "，".join(values)
