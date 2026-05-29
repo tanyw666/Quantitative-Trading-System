@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from quant_system.config.settings import DEFAULT_CONSTRAINT_POLICY
+
 
 def load_experiment_summary(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -33,6 +35,7 @@ def strategy_config_from_summary(
         "strategy": strategy_name,
         "params": dict(recommendation.get("params", {}) or {}),
         "scoring_weights": dict(recommendation.get("scoring_weights", {}) or {}),
+        "constraint_policy": dict(recommendation.get("constraint_policy", {}) or DEFAULT_CONSTRAINT_POLICY),
         "source": {
             "type": "experiment_summary",
             "recommended_case": recommendation.get("name", ""),

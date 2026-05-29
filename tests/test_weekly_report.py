@@ -44,6 +44,54 @@ def test_weekly_report_renders_selection_and_trade_stats():
                     }
                 ],
             },
+            strategy_health=[
+                {
+                    "strategy": "strong_stock_screen",
+                    "score": 74,
+                    "status": "watch",
+                    "action": "keep",
+                    "selection_count": 8,
+                    "trade_count": 3,
+                    "promotion_count": 2,
+                }
+            ],
+            strategy_rotation=[
+                {
+                    "strategy": "strong_stock_screen",
+                    "rotation_score": 72,
+                    "priority": "观察",
+                    "action": "只做计划内确认单",
+                    "recent_warn_count": 1,
+                    "recent_block_count": 0,
+                    "reasons": ["存在预警"],
+                }
+            ],
+            rotation_history={
+                "snapshot_count": 2,
+                "first_created_at": "2026-05-28T09:00:00+00:00",
+                "latest_created_at": "2026-05-29T09:00:00+00:00",
+                "strategies": [
+                    {"strategy": "strong_stock_screen", "latest_rotation_score": 72, "trend": "flat", "main_count": 0, "pause_count": 0, "avg_rotation_score": 70}
+                ],
+            },
+            constraint_summary={
+                "total": 2,
+                "warn_count": 1,
+                "block_count": 1,
+                "by_strategy": {"strong_stock_screen": 2},
+                "by_alert": {"execution_deviation": 1, "mistake_cluster": 1},
+                "latest_created_at": "2026-05-29T09:10:00+00:00",
+                "records": [
+                    {
+                        "created_at": "2026-05-29T09:10:00+00:00",
+                        "source": "portfolio.allocate",
+                        "strategy": "strong_stock_screen",
+                        "alert_level": "warn",
+                        "action": "reduce",
+                        "alerts": ["execution_deviation"],
+                    }
+                ],
+            },
             trade_stats={
                 "total_trades": 1,
                 "buy_count": 1,
@@ -52,6 +100,8 @@ def test_weekly_report_renders_selection_and_trade_stats():
                 "avg_execution_deviation_pct": 0.01,
                 "mistake_counts": {"追高": 1},
                 "tag_counts": {"计划内": 1},
+                "gate_counts": {"warn": 1},
+                "gate_violation_count": 1,
             },
             notes=[],
         )
@@ -64,11 +114,20 @@ def test_weekly_report_renders_selection_and_trade_stats():
     assert "策略实验" in content
     assert "策略晋升" in content
     assert "统一摘要" in content
+    assert "策略健康度" in content
+    assert "策略约束复盘" in content
+    assert "策略轮换建议" in content
+    assert "策略轮换历史" in content
+    assert "执行偏差过大" in content
+    assert "strong_stock_screen" in content
     assert "promoted.yaml" in content
     assert "balanced" in content
     assert "min_20d_return=0.12" in content
     assert "pass" in content
     assert "追高" in content
+    assert "盘前门禁" in content
+    assert "预警：1" in content
+    assert "预警/阻断状态下买入：1 笔" in content
 
 
 def test_weekly_report_renders_empty_experiment_summary():
@@ -91,3 +150,9 @@ def test_default_weekly_notes_mentions_mistakes():
     notes = default_weekly_notes([], {"mistake_counts": {"追高": 2}})
 
     assert notes
+
+
+def test_default_weekly_notes_mentions_gate_violations():
+    notes = default_weekly_notes([], {"gate_violation_count": 1})
+
+    assert any("盘前门禁" in note for note in notes)

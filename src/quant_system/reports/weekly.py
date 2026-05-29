@@ -5,12 +5,20 @@ from datetime import date
 
 import pandas as pd
 
+from quant_system.reports.constraint_summary import render_constraint_summary_lines
+from quant_system.reports.discipline_adherence import render_discipline_adherence_lines
+from quant_system.reports.discipline_advice import render_discipline_advice_lines
+from quant_system.reports.discipline_summary import render_discipline_summary_lines
 from quant_system.reports.experiment_summary import render_experiment_summary_lines
+from quant_system.reports.gate_review import render_gate_review_lines
 from quant_system.reports.promotion_summary import (
     render_promotion_priority_lines,
     render_promotion_summary_lines,
     summarize_promotion_priority,
 )
+from quant_system.reports.strategy_health import render_strategy_health_lines
+from quant_system.reports.strategy_rotation import render_strategy_rotation_lines
+from quant_system.reports.rotation_history import render_rotation_history_card_lines
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,14 @@ class WeeklyReportInput:
     gate_summary: list[dict] = field(default_factory=list)
     experiment_summary: dict | None = None
     promotion_summary: dict | None = None
+    strategy_health: list[dict] | None = None
+    constraint_summary: dict | None = None
+    strategy_rotation: list[dict] | None = None
+    rotation_history: dict | None = None
+    market_context: dict | None = None
+    gate_review: dict | None = None
+    discipline_summary: dict | None = None
+    discipline_adherence: dict | None = None
 
 
 class WeeklyReport:
@@ -41,14 +57,19 @@ class WeeklyReport:
         if priority.get("primary"):
             lines.append(f"- 统一摘要：{priority['primary']}")
 
-        lines.extend(
-            [
-                "",
-                "## 1. 市场环境",
-                "",
-            ]
-        )
+        lines.extend(["", "### 策略健康度", ""])
+        lines.extend(render_strategy_health_lines(data.strategy_health))
 
+        lines.extend(["", "### 策略约束复盘", ""])
+        lines.extend(render_constraint_summary_lines(data.constraint_summary))
+
+        lines.extend(["", "### 策略轮换建议", ""])
+        lines.extend(render_strategy_rotation_lines(data.strategy_rotation))
+
+        lines.extend(["", "### 策略轮换历史", ""])
+        lines.extend(render_rotation_history_card_lines(data.rotation_history))
+
+        lines.extend(["", "## 1. 市场环境", ""])
         if data.market_temperature:
             temp = data.market_temperature
             lines.extend(
@@ -64,7 +85,12 @@ class WeeklyReport:
         else:
             lines.extend(["- 暂无市场环境数据。", ""])
 
-        lines.extend(["## 2. 选股后验", ""])
+        if data.market_context:
+            lines.extend(["## 1.1 真实市场上下文", ""])
+            for item in data.market_context.get("summary_lines", []) or ["- 暂无真实市场上下文。"]:
+                lines.append(item)
+
+        lines.extend(["", "## 2. 选股回验", ""])
         if data.selection_summary:
             lines.extend(["| 周期 | 样本数 | 平均收益 | 胜率 |", "| --- | ---: | ---: | ---: |"])
             for row in data.selection_summary:
@@ -117,10 +143,34 @@ class WeeklyReport:
                 lines.append("交易标签：")
                 for name, count in tag_counts.items():
                     lines.append(f"- {name}：{count}")
+            gate_counts = stats.get("gate_counts", {})
+            if gate_counts:
+                lines.append("")
+                lines.append("盘前门禁：")
+                for name, count in gate_counts.items():
+                    lines.append(f"- {gate_status_label(name)}：{count}")
+                if int(stats.get("gate_violation_count", 0) or 0):
+                    lines.append(f"- 预警/阻断状态下买入：{int(stats.get('gate_violation_count', 0))} 笔")
         else:
             lines.append("- 暂无交易日志。")
 
         lines.extend(["", "## 6. 下周改进", ""])
+        lines.extend(["", "### Gate Discipline", ""])
+        lines.extend(render_gate_review_lines(data.gate_review))
+        lines.extend(["", "### Discipline Advice", ""])
+        lines.extend(
+            render_discipline_advice_lines(
+                gate_review=data.gate_review,
+                trade_stats=stats,
+            )
+        )
+
+        lines.extend(["", "### Discipline History", ""])
+        lines.extend(render_discipline_summary_lines(data.discipline_summary))
+
+        lines.extend(["", "### Discipline Adherence", ""])
+        lines.extend(render_discipline_adherence_lines(data.discipline_adherence))
+
         notes = data.notes or default_weekly_notes(data.selection_summary, stats)
         for note in notes:
             lines.append(f"- {note}")
@@ -134,9 +184,15 @@ def default_weekly_notes(selection_summary: list[dict], trade_stats: dict) -> li
     if not summary_frame.empty and "mean_return" in summary_frame.columns:
         weak = summary_frame[pd.to_numeric(summary_frame["mean_return"], errors="coerce") < 0]
         if not weak.empty:
-            notes.append("检查负收益周期的入选条件，避免弱势环境里扩大候选池。")
+            notes.append("先修复负收益周期的入选条件，弱势环境里不要硬扩候选池。")
     if trade_stats.get("mistake_counts"):
         notes.append("优先复盘出现次数最多的错误类型，下周只盯一个纪律问题改。")
+    if int(trade_stats.get("gate_violation_count", 0) or 0):
+        notes.append("复盘所有盘前门禁预警/阻断下的买入，确认是否违反计划纪律。")
     if not notes:
-        notes.append("保持记录完整性：每次候选、计划仓位和实际交易都要留痕。")
+        notes.append("保持记录完整：每次候选、计划仓位和实际交易都要留痕。")
     return notes
+
+
+def gate_status_label(status: str) -> str:
+    return {"pass": "通过", "warn": "预警", "block": "阻断"}.get(str(status), str(status))

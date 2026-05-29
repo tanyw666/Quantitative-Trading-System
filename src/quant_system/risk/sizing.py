@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 
 import pandas as pd
 
+from quant_system.optimizer.health_labels import alert_reasons_text
+
 
 REGIME_EXPOSURE = {
     "hot": 0.80,
@@ -48,6 +50,10 @@ class AllocationPlan:
     allocated_pct: float
     allocated_value: float
     items: list[AllocationItem]
+    strategy_alert_level: str = "pass"
+    strategy_action: str = ""
+    strategy_adjustment_note: str = ""
+    strategy_constraint: dict | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -62,16 +68,23 @@ def build_allocation_plan(
     max_positions: int = 5,
     regime_exposure: dict[str, float] | None = None,
     cap_by_risk: dict[str, float] | None = None,
+    strategy_health: dict | None = None,
 ) -> AllocationPlan:
     regime = str(market_temperature.get("regime", "empty"))
     stance = str(market_temperature.get("stance", "空仓观察"))
     regime_exposure = regime_exposure or REGIME_EXPOSURE
     cap_by_risk = cap_by_risk or RISK_CAP
-    target_exposure_pct = regime_exposure.get(regime, 0.0)
+    health_multiplier = _strategy_health_multiplier(strategy_health)
+    raw_target_exposure_pct = regime_exposure.get(regime, 0.0)
+    target_exposure_pct = raw_target_exposure_pct * health_multiplier
     target_exposure_value = cash * target_exposure_pct
+    alert_level = str((strategy_health or {}).get("alert_level", "pass") or "pass")
+    action = str((strategy_health or {}).get("action", "") or "")
+    adjustment_note = _strategy_adjustment_note(strategy_health, raw_target_exposure_pct, target_exposure_pct)
+    strategy_constraint = _strategy_constraint(strategy_health, alert_level, action, adjustment_note)
 
     if candidates.empty or target_exposure_pct <= 0:
-        return AllocationPlan(cash, regime, stance, target_exposure_pct, target_exposure_value, 0.0, 0.0, [])
+        return AllocationPlan(cash, regime, stance, target_exposure_pct, target_exposure_value, 0.0, 0.0, [], alert_level, action, adjustment_note, strategy_constraint)
 
     selected = candidates.copy().head(max_positions)
     if "score" not in selected.columns:
@@ -100,7 +113,7 @@ def build_allocation_plan(
         for idx in active_list:
             row = selected.loc[idx]
             risk_grade = str(row.get("risk_grade", "unknown"))
-            max_pct = min(cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)), remaining_pct)
+            max_pct = min(cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)) * health_multiplier, remaining_pct)
             desired_pct = remaining_pct * float(active_weights.loc[idx]) / weight_sum
             target_pct = min(desired_pct, max_pct)
             if target_pct > epsilon:
@@ -121,7 +134,7 @@ def build_allocation_plan(
         if target_pct <= epsilon:
             continue
         risk_grade = str(row.get("risk_grade", "unknown"))
-        max_pct = cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05))
+        max_pct = cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)) * health_multiplier
         allocated_pct += target_pct
         stop_price = row.get("atr_stop_price", None)
         if pd.isna(stop_price):
@@ -150,9 +163,57 @@ def build_allocation_plan(
         allocated_pct=round(allocated_pct, 4),
         allocated_value=round(allocated_value, 2),
         items=items,
+        strategy_alert_level=alert_level,
+        strategy_action=action,
+        strategy_adjustment_note=adjustment_note,
+        strategy_constraint=strategy_constraint,
     )
+
+
+def _strategy_health_multiplier(strategy_health: dict | None) -> float:
+    if not strategy_health:
+        return 1.0
+    alert_level = str(strategy_health.get("alert_level", "pass") or "pass")
+    action = str(strategy_health.get("action", "") or "")
+    if alert_level == "block" or action == "pause":
+        return 0.0
+    if alert_level == "warn":
+        return 0.5
+    return 1.0
 
 
 def _allocation_reason(regime: str, risk_grade: str, target_pct: float, max_pct: float) -> str:
     capped = "，已受单票风险上限约束" if target_pct >= max_pct else ""
     return f"市场状态 {regime}，个股风险 {risk_grade}{capped}"
+
+
+def _strategy_adjustment_note(strategy_health: dict | None, raw_target_exposure_pct: float, target_exposure_pct: float) -> str:
+    if not strategy_health:
+        return ""
+    strategy = str(strategy_health.get("strategy", "") or "")
+    alert_level = str(strategy_health.get("alert_level", "pass") or "pass")
+    alerts = strategy_health.get("alerts", []) or []
+    trigger_text = alert_reasons_text(alerts)
+    if alert_level == "block" or strategy_health.get("action") == "pause":
+        return (
+            f"{strategy} 策略健康度阻断，目标总仓位由 {raw_target_exposure_pct:.1%} 下调至 0.0%。"
+            f" 触发：{trigger_text}"
+        )
+    if alert_level == "warn" and target_exposure_pct < raw_target_exposure_pct:
+        return (
+            f"{strategy} 策略健康度预警，目标总仓位由 {raw_target_exposure_pct:.1%} 下调至 {target_exposure_pct:.1%}。"
+            f" 触发：{trigger_text}"
+        )
+    return ""
+
+
+def _strategy_constraint(strategy_health: dict | None, alert_level: str, action: str, note: str) -> dict | None:
+    if not strategy_health:
+        return None
+    return {
+        "strategy": str(strategy_health.get("strategy", "") or ""),
+        "alert_level": alert_level,
+        "action": action,
+        "alerts": list(strategy_health.get("alerts", []) or []),
+        "note": note,
+    }

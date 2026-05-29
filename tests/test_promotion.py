@@ -4,10 +4,12 @@ import pandas as pd
 
 from quant_system.optimizer.promotion import (
     append_promotion_record,
+    persist_promotion_record,
     promote_strategy_from_summary,
     read_promotion_records,
     summarize_promotion_records,
 )
+from quant_system.storage.sqlite_store import SQLiteStore
 
 
 def summary_file(tmp_path: Path) -> Path:
@@ -63,6 +65,7 @@ def test_promote_strategy_from_summary_writes_and_validates_config(tmp_path: Pat
     assert result.created_at
     assert result.summary.endswith("summary.json")
     assert result.output.endswith("promoted.yaml")
+    assert result.strategy_name == "strong_stock_screen_recommended"
     assert result.backtest_requested is False
     assert result.validation["smoke"]["rows"] == 1
 
@@ -89,6 +92,23 @@ def test_append_promotion_record_writes_jsonl(tmp_path: Path):
     assert records[0]["created_at"]
     assert records[0]["ok"] is True
     assert records[0]["output"].endswith("promoted.yaml")
+
+
+def test_persist_promotion_record_can_dual_write_jsonl_and_sqlite(tmp_path: Path):
+    output = tmp_path / "promoted.yaml"
+    log_path = tmp_path / "promotions.jsonl"
+    sqlite_path = tmp_path / "quant.sqlite"
+    result = promote_strategy_from_summary(summary_file(tmp_path), output, frame=sample_frame(), backtest=True)
+
+    persist_promotion_record(log_path, result, sqlite_path=sqlite_path)
+
+    records = read_promotion_records(log_path)
+    stored = SQLiteStore(sqlite_path).read_strategy_promotions(limit=1)
+
+    assert len(records) == 1
+    assert stored.loc[0, "output_path"].endswith("promoted.yaml")
+    assert stored.loc[0, "strategy_name"] == result.strategy_name
+    assert stored.loc[0, "total_return"] == result.backtest["total_return"]
 
 
 def test_summarize_promotion_records_compacts_history(tmp_path: Path):

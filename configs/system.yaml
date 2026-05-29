@@ -30,3 +30,22 @@ risk:
     medium: 0.12
     high: 0.06
     unknown: 0.05
+  constraint_policy:
+    window_days: 5
+    cooldown_block_count: 2
+    single_block_pause: 1
+    warn_escalation_count: 2
+    recover_after_clean_days: 3
+    warn_exposure_multiplier: 0.50
+    strategies:
+      dragon_leader:
+        window_days: 3
+        single_block_pause: 1
+        cooldown_block_count: 2
+        recover_after_clean_days: 4
+        warn_exposure_multiplier: 0.30
+      strong_stock_screen:
+        window_days: 7
+        single_block_pause: 2
+        recover_after_clean_days: 3
+        warn_exposure_multiplier: 0.50

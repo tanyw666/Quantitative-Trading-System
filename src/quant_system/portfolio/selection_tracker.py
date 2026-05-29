@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from quant_system.storage.jsonl import append_jsonl, read_jsonl
+from quant_system.storage.sqlite_store import SQLiteStore
 
 
 @dataclass(frozen=True)
@@ -22,15 +23,26 @@ class SelectionRecord:
 
 
 class SelectionTracker:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, sqlite_path: Path | None = None) -> None:
         self.path = path
+        self.sqlite_path = sqlite_path
 
     def record(self, selection: SelectionRecord) -> None:
-        append_jsonl(self.path, asdict(selection))
+        payload = asdict(selection)
+        append_jsonl(self.path, payload)
+        if self.sqlite_path is not None:
+            store = SQLiteStore(self.sqlite_path)
+            store.init()
+            store.insert_selections([payload])
 
     def record_many(self, selections: list[SelectionRecord]) -> None:
-        for selection in selections:
-            self.record(selection)
+        payloads = [asdict(selection) for selection in selections]
+        for payload in payloads:
+            append_jsonl(self.path, payload)
+        if self.sqlite_path is not None and payloads:
+            store = SQLiteStore(self.sqlite_path)
+            store.init()
+            store.insert_selections(payloads)
 
     def history(self) -> list[dict]:
         return read_jsonl(self.path)

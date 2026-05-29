@@ -5,3 +5,10 @@ params:
   min_20d_return: 0.12
   min_volume_ratio: 1.5
   max_atr_pct: 0.12
+constraint_policy:
+  window_days: 7
+  single_block_pause: 2
+  cooldown_block_count: 2
+  warn_escalation_count: 2
+  recover_after_clean_days: 3
+  warn_exposure_multiplier: 0.50

@@ -73,6 +73,45 @@ scoring_weights:
     assert strategy.scoring_weights == {"momentum_20": 0.8, "volume_ratio_20": 0.1}
 
 
+def test_create_strategy_from_config_attaches_constraint_policy(tmp_path: Path):
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        """
+name: policy_strong
+strategy: strong_stock_screen
+constraint_policy:
+  window_days: 7
+  single_block_pause: 2
+  warn_exposure_multiplier: 0.4
+""",
+        encoding="utf-8",
+    )
+
+    strategy = create_strategy_from_config(path)
+
+    assert isinstance(strategy, StrongStockScreen)
+    assert strategy.constraint_policy["window_days"] == 7
+    assert strategy.constraint_policy["single_block_pause"] == 2
+
+
+def test_create_strategy_from_config_accepts_nested_risk_constraint_policy(tmp_path: Path):
+    path = tmp_path / "nested_policy.yaml"
+    path.write_text(
+        """
+name: nested_policy
+strategy: strong_stock_screen
+risk:
+  constraint_policy:
+    recover_after_clean_days: 5
+""",
+        encoding="utf-8",
+    )
+
+    strategy = create_strategy_from_config(path)
+
+    assert strategy.constraint_policy["recover_after_clean_days"] == 5
+
+
 def test_create_strategy_from_legacy_name_config(tmp_path: Path):
     path = tmp_path / "legacy.yaml"
     path.write_text(

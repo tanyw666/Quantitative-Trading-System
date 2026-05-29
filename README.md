@@ -92,7 +92,9 @@ python -m quant_system portfolio allocate --csv data/sample_ohlcv.csv --strategy
 python -m quant_system portfolio precheck --csv data/sample_ohlcv.csv --strategy strong_stock_screen --symbol 000001 --entry-price 38 --planned-pct 0.10 --stop-price 35 --target-price 44 --cash 100000 --top 5
 ```
 
-检查项包括市场状态、是否在候选池、计划仓位是否超限、止损距离和盈亏比。
+检查项包括市场状态、策略健康度、是否在候选池、风险等级、买入价偏离、计划仓位、止损距离和盈亏比。
+
+需要可直接打印给盘前使用的清单时，加上 `--format markdown`。
 
 使用系统配置覆盖评分和仓位规则：
 

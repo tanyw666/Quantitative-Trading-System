@@ -45,3 +45,9 @@ def _attach_config_metadata(strategy: Any, config: dict[str, Any]) -> None:
     strategy.config_name = config.get("name", "")
     strategy.config_description = config.get("description", "")
     strategy.scoring_weights = dict(config.get("scoring_weights", {}) or {})
+    risk = config.get("risk", {}) if isinstance(config.get("risk", {}), dict) else {}
+    strategy.constraint_policy = dict(
+        config.get("constraint_policy", {})
+        or (risk.get("constraint_policy", {}) if isinstance(risk, dict) else {})
+        or {}
+    )

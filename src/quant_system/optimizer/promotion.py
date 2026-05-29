@@ -11,6 +11,7 @@ from quant_system.backtest.engine import BacktestConfig, BacktestEngine
 from quant_system.optimizer.export_strategy import load_experiment_summary, strategy_config_from_summary, write_strategy_config
 from quant_system.optimizer.strategy_validation import validate_strategy_config
 from quant_system.storage.jsonl import append_jsonl, read_jsonl
+from quant_system.storage.sqlite_store import SQLiteStore
 from quant_system.strategies.registry import create_strategy_from_config
 
 
@@ -19,6 +20,7 @@ class StrategyPromotionResult:
     created_at: str
     summary: str
     output: str
+    strategy_name: str
     ok: bool
     backtest_requested: bool
     buy_price_field: str
@@ -31,6 +33,7 @@ class StrategyPromotionResult:
             "created_at": self.created_at,
             "summary": self.summary,
             "output": self.output,
+            "strategy_name": self.strategy_name,
             "ok": self.ok,
             "backtest_requested": self.backtest_requested,
             "buy_price_field": self.buy_price_field,
@@ -66,6 +69,7 @@ def promote_strategy_from_summary(
         created_at=datetime.now(timezone.utc).isoformat(),
         summary=str(summary_path),
         output=str(output_path),
+        strategy_name=str(config.get("name", "")),
         ok=validation.ok,
         backtest_requested=backtest,
         buy_price_field=buy_price_field,
@@ -81,6 +85,15 @@ def append_promotion_record(path: Path, result: StrategyPromotionResult) -> None
 
 def read_promotion_records(path: Path) -> list[dict[str, Any]]:
     return read_jsonl(path)
+
+
+def persist_promotion_record(path: Path, result: StrategyPromotionResult, sqlite_path: Path | None = None) -> None:
+    payload = result.to_dict()
+    append_jsonl(path, payload)
+    if sqlite_path is not None:
+        store = SQLiteStore(sqlite_path)
+        store.init()
+        store.insert_strategy_promotion(payload)
 
 
 def summarize_promotion_records(records: list[dict[str, Any]], limit: int = 20) -> dict[str, Any]:
