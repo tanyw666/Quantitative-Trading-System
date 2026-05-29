@@ -7,3 +7,10 @@ __pycache__/
 venv/
 *.egg-info/
 data/cache/
+data/review/*.jsonl
+data/provider_health.json
+configs/universe_*_live.csv
+reports/*.md
+reports/*.json
+reports/*.jsonl
+tools/fix_cli.py
