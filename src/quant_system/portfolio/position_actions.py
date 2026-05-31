@@ -9,6 +9,7 @@ from typing import Any
 from quant_system.portfolio.positions import PositionBook
 from quant_system.portfolio.risk_check import HoldingRiskReport
 from quant_system.storage.jsonl import append_jsonl, read_jsonl
+from quant_system.storage.sqlite_store import SQLiteStore
 
 
 @dataclass(frozen=True)
@@ -161,9 +162,17 @@ def render_position_action_plan_lines(plan: dict[str, Any] | PositionActionPlan 
     return lines
 
 
-def append_position_action_plan_record(path: Path, plan: PositionActionPlan | dict[str, Any]) -> None:
+def append_position_action_plan_record(
+    path: Path,
+    plan: PositionActionPlan | dict[str, Any],
+    sqlite_path: Path | None = None,
+) -> None:
     payload = plan.to_dict() if isinstance(plan, PositionActionPlan) else dict(plan)
     append_jsonl(path, payload)
+    if sqlite_path is not None:
+        store = SQLiteStore(sqlite_path)
+        store.init()
+        store.insert_position_action_plan(payload)
 
 
 def read_position_action_plan_records(path: Path) -> list[dict[str, Any]]:

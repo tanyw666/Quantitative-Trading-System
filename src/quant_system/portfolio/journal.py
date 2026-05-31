@@ -26,6 +26,7 @@ class TradeJournalEntry:
     target_price: float | None = None
     tags: list[str] = field(default_factory=list)
     mistake_type: str = ""
+    emotion_tag: str = ""
     review: str = ""
     gate_status: str = ""
     gate_message: str = ""
@@ -33,6 +34,23 @@ class TradeJournalEntry:
     workflow_summary: str = ""
     discipline_exception: bool = False
     exception_reason: str = ""
+    execution_confirmation_path: str = ""
+    execution_confirmation_created_at: str = ""
+    execution_confirmation_status: str = ""
+    execution_confirmation_decision: str = ""
+    confirmation_price: float | None = None
+    confirmation_reference_price: float | None = None
+    confirmed_pct: float = 0.0
+    confirmed_value: float = 0.0
+    suggested_quantity: int = 0
+    confirmation_price_deviation_pct: float | None = None
+    order_approval_path: str = ""
+    order_approval_created_at: str = ""
+    order_approval_status: str = ""
+    order_approval_decision: str = ""
+    approved_pct: float = 0.0
+    approved_value: float = 0.0
+    approved_quantity: int = 0
 
     @property
     def amount(self) -> float:
@@ -77,6 +95,7 @@ def summarize_trade_journal(records: list[dict]) -> dict:
     deviations = []
     gate_violation_count = 0
     discipline_exception_count = 0
+    emotion_counts: Counter[str] = Counter()
 
     for record in records:
         total_amount += float(record.get("amount", 0.0) or 0.0)
@@ -87,6 +106,9 @@ def summarize_trade_journal(records: list[dict]) -> dict:
             gate_violation_count += 1
         if record.get("discipline_exception"):
             discipline_exception_count += 1
+        emotion = _emotion_tag(record)
+        if emotion:
+            emotion_counts[emotion] += 1
         tags = record.get("tags", [])
         if isinstance(tags, str):
             tags = [item.strip() for item in tags.split(",") if item.strip()]
@@ -104,6 +126,8 @@ def summarize_trade_journal(records: list[dict]) -> dict:
         "gate_counts": dict(gate_counts),
         "gate_violation_count": gate_violation_count,
         "discipline_exception_count": discipline_exception_count,
+        "emotion_counts": dict(emotion_counts),
+        "emotional_trade_count": sum(emotion_counts.values()),
     }
 
 
@@ -116,6 +140,8 @@ def summarize_gate_journal(records: list[dict], limit: int = 20) -> dict:
     gate_records: list[dict] = []
     violations: list[dict] = []
     missing_gate_count = 0
+    structure_violation_count = 0
+    structure_reasons: Counter[str] = Counter()
 
     for record in records:
         status = str(record.get("gate_status", "") or "").strip().lower()
@@ -148,6 +174,10 @@ def summarize_gate_journal(records: list[dict], limit: int = 20) -> dict:
         reason_counts.update(reason for reason in reasons if reason)
         if side == "BUY" and status in {"warn", "block"}:
             violations.append(item)
+            matched_structure_reasons = _structure_gate_reasons(reasons, item["message"])
+            if matched_structure_reasons:
+                structure_violation_count += 1
+                structure_reasons.update(matched_structure_reasons)
 
     gate_buy_count = sum(buy_status_counts.values())
     violation_count = len(violations)
@@ -162,8 +192,10 @@ def summarize_gate_journal(records: list[dict], limit: int = 20) -> dict:
         "buy_status_counts": dict(buy_status_counts),
         "gate_buy_count": gate_buy_count,
         "violation_count": violation_count,
+        "structure_violation_count": structure_violation_count,
         "violation_rate": violation_count / gate_buy_count if gate_buy_count else 0.0,
         "by_reason": dict(reason_counts),
+        "by_structure_reason": dict(structure_reasons),
         "by_strategy": dict(strategy_counts),
         "by_symbol": dict(symbol_counts),
         "latest_records": visible_records,
@@ -171,6 +203,7 @@ def summarize_gate_journal(records: list[dict], limit: int = 20) -> dict:
         "action_items": _gate_action_items(
             missing_gate_count=missing_gate_count,
             violation_count=violation_count,
+            structure_violation_count=structure_violation_count,
             reason_counts=reason_counts,
             status_counts=status_counts,
         ),
@@ -195,6 +228,7 @@ def summarize_discipline_exceptions(records: list[dict], limit: int = 20) -> dic
             "amount": float(record.get("amount", 0.0) or 0.0),
             "gate_status": str(record.get("gate_status", "") or ""),
             "exception_reason": str(record.get("exception_reason", "") or "").strip(),
+            "exception_sources": _discipline_exception_sources(record),
             "review": str(record.get("review", "") or ""),
         }
         exception_records.append(item)
@@ -236,10 +270,25 @@ def _normalise_reason_list(value: object) -> list[str]:
     return []
 
 
+def _emotion_tag(record: dict) -> str:
+    explicit = str(record.get("emotion_tag", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    tags = record.get("tags", [])
+    if isinstance(tags, str):
+        tags = [item.strip() for item in tags.split(",") if item.strip()]
+    for tag in tags:
+        text = str(tag).strip().lower()
+        if text.startswith("emotion:"):
+            return text.split(":", 1)[1]
+    return ""
+
+
 def _gate_action_items(
     *,
     missing_gate_count: int,
     violation_count: int,
+    structure_violation_count: int,
     reason_counts: Counter[str],
     status_counts: Counter[str],
 ) -> list[str]:
@@ -248,6 +297,8 @@ def _gate_action_items(
         items.append("Some trades have no gate snapshot; attach workflow summary or manual gate fields when recording trades.")
     if violation_count:
         items.append("Review every BUY executed under warn/block status and mark whether it was a planned exception.")
+    if structure_violation_count:
+        items.append("Structure-gate violations found; next session must block chase entries until a clean pretrade check is regenerated.")
     if status_counts.get("block", 0):
         items.append("Blocked gate records should create next-day no-new-position discipline unless manually cleared.")
     if reason_counts:
@@ -256,6 +307,24 @@ def _gate_action_items(
     if not items:
         items.append("Gate discipline is clean in the current sample; keep recording every premarket gate before trading.")
     return items
+
+
+def _structure_gate_reasons(reasons: list[str], message: str) -> list[str]:
+    keywords = {
+        "entry_structure",
+        "volume_price_confirmation",
+        "false_breakout",
+        "candle_warning",
+        "chase_risk",
+        "pretrade_structure",
+    }
+    values = [str(item).strip() for item in reasons if str(item).strip()]
+    message_text = str(message or "").lower()
+    matched = [item for item in values if item in keywords or any(keyword in item for keyword in keywords)]
+    for keyword in sorted(keywords):
+        if keyword in message_text:
+            matched.append(keyword)
+    return list(dict.fromkeys(matched))
 
 
 def _top_counter_key(values: Counter[str]) -> str:
@@ -282,3 +351,31 @@ def _discipline_exception_action_items(
     if not items:
         items.append("No discipline exceptions recorded; keep using explicit exception reasons only for planned overrides.")
     return items
+
+
+def _discipline_exception_sources(record: dict) -> list[str]:
+    sources: list[str] = []
+    side = str(record.get("side", "") or "").upper()
+    if side == "BUY":
+        gate_status = str(record.get("gate_status", "") or "")
+        if gate_status in {"warn", "block"}:
+            sources.append(f"gate:{gate_status}")
+        confirm_status = str(record.get("execution_confirmation_status", "") or "")
+        if confirm_status == "block":
+            sources.append("execution_confirm:block")
+        approval_status = str(record.get("order_approval_status", "") or "")
+        if approval_status == "block":
+            sources.append("order_approval:block")
+        quantity = int(record.get("quantity", 0) or 0)
+        suggested_quantity = int(record.get("suggested_quantity", 0) or 0)
+        approved_quantity = int(record.get("approved_quantity", 0) or 0)
+        if suggested_quantity > 0 and quantity > suggested_quantity:
+            sources.append("execution_confirm:size_exceeded")
+        if approved_quantity > 0 and quantity > approved_quantity:
+            sources.append("order_approval:size_exceeded")
+        if record.get("confirmation_price_deviation_pct") is not None and float(record.get("confirmation_price_deviation_pct") or 0) > 0.005:
+            sources.append("execution_confirm:price_chase")
+    for reason in _normalise_reason_list(record.get("gate_reasons", [])):
+        if reason.startswith("forced-"):
+            sources.append(reason.replace("forced-", "").replace("-", ":"))
+    return list(dict.fromkeys(source for source in sources if source))

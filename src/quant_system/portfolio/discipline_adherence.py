@@ -88,6 +88,8 @@ def _evaluate_record(
             violations.append("missing_gate_snapshot_after_advice")
     if _zero_exposure_block(record) and rule_buys:
         violations.append("new_buy_under_zero_exposure")
+    if _structure_cooldown(record) and rule_buys:
+        violations.append("structure_cooldown_buy")
     if unexplained_exception_buys:
         violations.append("unexplained_discipline_exception")
 
@@ -169,6 +171,13 @@ def _zero_exposure_block(record: dict[str, Any]) -> bool:
     target = float(record.get("target_exposure_pct", 0) or 0)
     allocated = float(record.get("allocated_pct", 0) or 0)
     return target == 0 and allocated > 0
+
+
+def _structure_cooldown(record: dict[str, Any]) -> bool:
+    if int(record.get("structure_violation_count", 0) or 0) >= 2:
+        return True
+    advice = " ".join(str(item).lower() for item in record.get("advice", []) or [])
+    return "structure rule" in advice and "next session blocks" in advice
 
 
 def _is_explained_exception(trade: dict[str, Any]) -> bool:

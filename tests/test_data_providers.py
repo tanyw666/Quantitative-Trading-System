@@ -8,6 +8,8 @@ from quant_system.data.providers import (
     _market_prefix,
     fetch_table_with_fallback,
     fetch_with_fallback,
+    minute_provider_chain,
+    normalize_adjustment_factors,
     normalize_daily_bars,
     ordered_provider_chain,
     provider_chain,
@@ -31,6 +33,32 @@ def test_normalize_daily_bars_accepts_akshare_columns():
 
     assert frame["symbol"].tolist() == ["000001"]
     assert frame["close"].tolist() == [10.5]
+
+
+def test_normalize_daily_bars_drops_suspension_placeholder_rows():
+    raw = pd.DataFrame(
+        {
+            "date": ["2024-11-06", "2024-11-07"],
+            "open": [0, 10],
+            "high": [0, 11],
+            "low": [0, 9],
+            "close": [10.5, 10.2],
+            "volume": [0, 1000],
+        }
+    )
+
+    frame = normalize_daily_bars(raw, "1")
+
+    assert frame["date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-11-07"]
+
+
+def test_normalize_adjustment_factors_accepts_akshare_factor_columns():
+    raw = pd.DataFrame({"date": ["2024-06-14"], "qfq_factor": ["1.0756"]})
+
+    frame = normalize_adjustment_factors(raw, "1", "qfq")
+
+    assert frame["symbol"].tolist() == ["000001"]
+    assert frame["adjust_factor"].tolist() == [1.0756]
 
 
 def test_market_prefix_supports_beijing_exchange_codes():
@@ -69,9 +97,119 @@ def test_fetch_with_fallback_uses_sina_when_akshare_fails(monkeypatch):
     assert result.frame["symbol"].tolist() == ["000001"]
 
 
+def test_fetch_with_fallback_skips_invalid_provider_frame(monkeypatch):
+    updates: list[tuple[str, bool, str]] = []
+
+    class FakeHealthStore:
+        def __init__(self, _path):
+            pass
+
+        def read(self):
+            return {}
+
+        def update(self, name: str, ok: bool, error: str = ""):
+            updates.append((name, ok, error))
+
+    class BadProvider:
+        name = "bad"
+
+        def fetch_daily(self, symbol: str, start: str, end: str, adjust: str = "qfq"):
+            return pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-01"]),
+                    "open": [10],
+                    "high": [9],
+                    "low": [8],
+                    "close": [10],
+                    "volume": [1000],
+                    "symbol": ["000001"],
+                }
+            )
+
+    class GoodProvider:
+        name = "good"
+
+        def fetch_daily(self, symbol: str, start: str, end: str, adjust: str = "qfq"):
+            return pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-01"]),
+                    "open": [10],
+                    "high": [11],
+                    "low": [9],
+                    "close": [10],
+                    "volume": [1000],
+                    "symbol": ["000001"],
+                }
+            )
+
+    monkeypatch.setattr("quant_system.data.providers.ProviderHealthStore", FakeHealthStore)
+    monkeypatch.setattr("quant_system.data.providers.provider_chain", lambda source="auto": [BadProvider(), GoodProvider()])
+
+    result = fetch_with_fallback("000001", "20240101", "20240527", "qfq", source="auto", attempts=1)
+
+    assert result.provider == "good"
+    assert result.attempts[0]["status"] == "failed"
+    assert result.attempts[-1]["status"] == "success"
+    assert updates[0][0] == "bad"
+    assert updates[0][1] is False
+    assert updates[-1][0] == "good"
+    assert updates[-1][1] is True
+
+
+def test_fetch_with_fallback_records_empty_result_as_failed(monkeypatch):
+    updates: list[tuple[str, bool, str]] = []
+
+    class FakeHealthStore:
+        def __init__(self, _path):
+            pass
+
+        def read(self):
+            return {}
+
+        def update(self, name: str, ok: bool, error: str = ""):
+            updates.append((name, ok, error))
+
+    class EmptyProvider:
+        name = "empty"
+
+        def fetch_daily(self, symbol: str, start: str, end: str, adjust: str = "qfq"):
+            return pd.DataFrame()
+
+    class GoodProvider:
+        name = "good"
+
+        def fetch_daily(self, symbol: str, start: str, end: str, adjust: str = "qfq"):
+            return pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-01"]),
+                    "open": [10],
+                    "high": [11],
+                    "low": [9],
+                    "close": [10],
+                    "volume": [1000],
+                    "symbol": ["000001"],
+                }
+            )
+
+    monkeypatch.setattr("quant_system.data.providers.ProviderHealthStore", FakeHealthStore)
+    monkeypatch.setattr("quant_system.data.providers.provider_chain", lambda source="auto": [EmptyProvider(), GoodProvider()])
+
+    result = fetch_with_fallback("000001", "20240101", "20240527", "qfq", source="auto", attempts=1)
+
+    assert result.provider == "good"
+    assert result.attempts[0]["status"] == "empty"
+    assert updates[0] == ("empty", False, "empty result")
+
+
 def test_provider_chain_auto_prefers_stable_live_sources_first():
     names = [provider.name for provider in provider_chain("auto")]
     assert names == ["sina", "tencent", "akshare", "mootdx"]
+
+
+def test_minute_provider_chain_uses_akshare_then_tencent_fallback():
+    names = [provider.name for provider in minute_provider_chain("auto")]
+
+    assert names == ["akshare-minute", "tencent-minute"]
 
 
 def test_table_provider_chain_auto_orders_sources():

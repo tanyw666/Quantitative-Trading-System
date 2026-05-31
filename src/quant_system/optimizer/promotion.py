@@ -24,6 +24,7 @@ class StrategyPromotionResult:
     ok: bool
     backtest_requested: bool
     buy_price_field: str
+    execution_timing: str
     cash: float
     validation: dict[str, Any]
     backtest: dict[str, Any] = field(default_factory=dict)
@@ -39,6 +40,7 @@ class StrategyPromotionResult:
             "ok": self.ok,
             "backtest_requested": self.backtest_requested,
             "buy_price_field": self.buy_price_field,
+            "execution_timing": self.execution_timing,
             "cash": self.cash,
             "validation": self.validation,
             "backtest": self.backtest,
@@ -54,7 +56,8 @@ def promote_strategy_from_summary(
     description: str | None = None,
     frame: pd.DataFrame | None = None,
     backtest: bool = False,
-    buy_price_field: str = "close",
+    buy_price_field: str = "open",
+    execution_timing: str = "next_bar",
     cash: float = 100000.0,
     trade_plan_pressure: dict[str, Any] | None = None,
 ) -> StrategyPromotionResult:
@@ -67,7 +70,7 @@ def promote_strategy_from_summary(
     if validation.ok and backtest and frame is not None:
         strategy = create_strategy_from_config(output_path)
         backtest_summary = BacktestEngine(
-            BacktestConfig(initial_cash=cash, buy_price_field=buy_price_field)
+            BacktestConfig(initial_cash=cash, buy_price_field=buy_price_field, execution_timing=execution_timing)
         ).run(frame, strategy).summary()
 
     pressure = _trade_plan_pressure_from_validation(validation.to_dict(), trade_plan_pressure)
@@ -80,6 +83,7 @@ def promote_strategy_from_summary(
         ok=validation.ok,
         backtest_requested=backtest,
         buy_price_field=buy_price_field,
+        execution_timing=execution_timing,
         cash=cash,
         validation=validation.to_dict(),
         backtest=backtest_summary,

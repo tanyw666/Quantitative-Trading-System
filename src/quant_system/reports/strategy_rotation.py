@@ -47,9 +47,13 @@ def build_strategy_rotation(
         if policy_state in {"blocked", "cooldown"}:
             score -= 15
             reasons.append("处于冷静期/阻断规则")
-        elif policy_state in {"watch", "repeated_warn"}:
+        elif policy_state in {"watch", "repeated_warn", "recovery_probe"}:
             score -= 6
             reasons.append("处于恢复观察")
+
+        elif policy_state == "recovered":
+            score += 4
+            reasons.append("constraint recovery passed")
 
         pressure = normalize_trade_plan_pressure(item)
         match_rate = float(pressure.get("match_rate", 0) or 0) if pressure else 0.0
@@ -68,7 +72,7 @@ def build_strategy_rotation(
             elif match_rate < 0.85 or unmatched_plans > 0 or orphan_trades > 0 or abs(avg_price_deviation_pct) > 0.03:
                 score -= 12
                 reasons.append("计划-成交存在漂移")
-                if policy_state in {"watch", "repeated_warn"} or alert_level == "warn":
+                if policy_state in {"watch", "repeated_warn", "recovery_probe"} or alert_level == "warn":
                     score -= 4
                     reasons.append("漂移叠加预警状态")
         elif abs(avg_price_deviation_pct) > 0.03:
@@ -87,6 +91,11 @@ def build_strategy_rotation(
             elif lifecycle_action == "reduce" or lifecycle_level == "warn":
                 score -= 8
                 reasons.append("生命周期闭环降档")
+
+            doctor_status = str(lifecycle_pressure.get("doctor_status", "") or "")
+            doctor_issue_count = int(lifecycle_pressure.get("doctor_issue_count", 0) or 0)
+            if doctor_status in {"warn", "fail"}:
+                reasons.append(f"review ledger {doctor_status}({doctor_issue_count})")
 
         warn_count = int(constraint_counts.get("warn", 0))
         block_count = int(constraint_counts.get("block", 0))

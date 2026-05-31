@@ -7,6 +7,7 @@ import pandas as pd
 
 from quant_system.factors.technical import add_core_factors
 from quant_system.screening.scoring import score_candidates
+from quant_system.screening.value_filters import add_value_filter_fields
 from quant_system.strategies.conditions import evaluate_condition
 
 
@@ -36,7 +37,7 @@ class ConfigurableScreenStrategy:
         return cls.from_mapping(config)
 
     def generate_signals(self, frame: pd.DataFrame) -> pd.DataFrame:
-        data = add_core_factors(frame)
+        data = add_value_filter_fields(add_core_factors(frame))
         results = data.apply(lambda row: evaluate_condition(row, self.condition), axis=1)
         data["buy_signal"] = [result.passed for result in results]
         data["sell_signal"] = False
@@ -65,6 +66,29 @@ class ConfigurableScreenStrategy:
                 "volume_ratio_20",
                 "atr_14",
                 "atr_pct_14",
+                "ma20_slope_5",
+                "close_to_ma20",
+                "close_to_rolling_high_20",
+                "traded_value",
+                "rsi_14",
+                "trend_quality_score",
+                "entry_structure_score",
+                "chase_risk_score",
+                "candle_warning_count",
+                "volume_price_state",
+                "false_breakout_flag",
+                "value_filter_status",
+                "value_filter_reason",
+                "value_warning_count",
+                "tape_pressure_score",
+                "tape_distribution_warning",
+                "tape_accumulation_hint",
+                "volume_confirmation_score",
+                "candle_quality_score",
+                "breakout_quality_score",
+                "false_breakout_pressure",
+                "close_position_in_range",
+                "upper_shadow_pct",
                 "reason",
             )
             if col in selected.columns

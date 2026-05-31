@@ -16,6 +16,8 @@ class Trade:
     quantity: int
     fee: float
     reason: str
+    signal_date: pd.Timestamp | None = None
+    price_field: str = "close"
 
 
 @dataclass

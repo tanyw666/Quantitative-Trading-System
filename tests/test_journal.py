@@ -85,6 +85,18 @@ def test_summarize_trade_journal_counts_gate_violations():
     assert summary["gate_violation_count"] == 1
 
 
+def test_summarize_trade_journal_counts_emotion_tags():
+    records = [
+        {"side": "BUY", "amount": 1000, "emotion_tag": "greed", "tags": []},
+        {"side": "BUY", "amount": 1000, "tags": ["emotion:fear"]},
+    ]
+
+    summary = summarize_trade_journal(records)
+
+    assert summary["emotion_counts"] == {"greed": 1, "fear": 1}
+    assert summary["emotional_trade_count"] == 2
+
+
 def test_summarize_gate_journal_builds_discipline_panel():
     records = [
         {
@@ -124,6 +136,38 @@ def test_summarize_gate_journal_builds_discipline_panel():
     assert summary["action_items"]
 
 
+def test_summarize_gate_journal_counts_structure_gate_violations():
+    records = [
+        {
+            "date": "2026-05-29",
+            "symbol": "000001",
+            "side": "BUY",
+            "strategy": "strong_stock_screen",
+            "amount": 1000,
+            "gate_status": "warn",
+            "gate_message": "Chase-risk score is elevated.",
+            "gate_reasons": ["chase_risk"],
+        },
+        {
+            "date": "2026-05-29",
+            "symbol": "000002",
+            "side": "BUY",
+            "strategy": "trend_breakout",
+            "amount": 1200,
+            "gate_status": "block",
+            "gate_message": "False-breakout flag is active.",
+            "gate_reasons": ["false_breakout"],
+        },
+    ]
+
+    summary = summarize_gate_journal(records, limit=10)
+
+    assert summary["structure_violation_count"] == 2
+    assert summary["by_structure_reason"]["chase_risk"] == 1
+    assert summary["by_structure_reason"]["false_breakout"] == 1
+    assert any("Structure-gate violations" in item for item in summary["action_items"])
+
+
 def test_summarize_discipline_exceptions_requires_reasons():
     records = [
         {
@@ -141,6 +185,8 @@ def test_summarize_discipline_exceptions_requires_reasons():
             "side": "BUY",
             "strategy": "dragon",
             "amount": 2000,
+            "gate_status": "block",
+            "gate_reasons": ["forced-gate-block"],
             "discipline_exception": True,
             "exception_reason": "",
         },
@@ -153,6 +199,7 @@ def test_summarize_discipline_exceptions_requires_reasons():
     assert summary["missing_reason_count"] == 1
     assert summary["by_strategy"]["dragon"] == 2
     assert summary["latest_missing_reason"][0]["symbol"] == "000002"
+    assert "gate:block" in summary["latest_missing_reason"][0]["exception_sources"]
     assert summary["action_items"]
 
 

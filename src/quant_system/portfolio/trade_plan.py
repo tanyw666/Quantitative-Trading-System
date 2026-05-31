@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from quant_system.risk.pretrade import PreTradeResult
 from quant_system.risk.sizing import AllocationPlan
 from quant_system.storage.jsonl import append_jsonl, read_jsonl
+from quant_system.storage.sqlite_store import SQLiteStore
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,8 @@ def build_trade_plan_batch(
     market_temperature: dict,
     cash: float,
     max_positions: int,
+    regime_exposure: dict[str, float] | None = None,
+    cap_by_risk: dict[str, float] | None = None,
     strategy_health: dict | None = None,
     trade_date: str | None = None,
     discipline_exception: bool = False,
@@ -161,6 +166,8 @@ def build_trade_plan_batch(
         market_temperature,
         cash=cash,
         max_positions=max_positions,
+        regime_exposure=regime_exposure,
+        cap_by_risk=cap_by_risk,
         strategy_health=strategy_health,
     )
     candidate_snapshot = candidates.to_dict(orient="records") if hasattr(candidates, "to_dict") else list(candidates or [])
@@ -182,6 +189,8 @@ def build_trade_plan_batch(
             stop_price=stop_price,
             target_price=target_price,
             max_positions=max_positions,
+            regime_exposure=regime_exposure,
+            cap_by_risk=cap_by_risk,
             strategy_health=strategy_health,
         )
         plans.append(
@@ -194,14 +203,17 @@ def build_trade_plan_batch(
                 exception_reason=exception_reason,
             )
         )
+    strategy_blocked = allocation_plan.strategy_alert_level == "block" or allocation_plan.strategy_action == "pause"
+    plan_statuses = {plan.status for plan in plans}
+    status = "block" if strategy_blocked or "block" in plan_statuses else "warn" if "warn" in plan_statuses else "pass"
     return TradePlanBatch(
         created_at=datetime.now(timezone.utc).isoformat(),
         trade_date=trade_date or date.today().isoformat(),
         strategy=str((allocation_plan.strategy_constraint or {}).get("strategy", "") or ""),
         market_regime=str(allocation_plan.regime),
         stance=str(allocation_plan.stance),
-        status="block" if any(plan.status == "block" for plan in plans) else "pass",
-        gate_status="warn" if any(plan.gate_status in {"warn", "block"} for plan in plans) else "pass",
+        status=status,
+        gate_status=status,
         total_candidates=len(candidate_snapshot),
         total_plans=len(plans),
         total_planned_value=round(sum(plan.planned_value for plan in plans), 2),
@@ -220,7 +232,7 @@ def render_trade_plan_markdown(plan: TradePlan) -> str:
         f"- 策略：{plan.strategy}",
         f"- 市场：{plan.market_regime} / {plan.stance}",
         f"- 状态：{plan.status}",
-        f"- 门禁：{plan.gate_status}",
+        f"- 闸门：{plan.gate_status}",
         f"- 计划仓位：{plan.planned_pct:.1%}（{plan.planned_value:.2f}）",
         f"- 可用仓位：{plan.allowed_pct:.1%}（{plan.allowed_value:.2f}）",
         f"- 买入价：{plan.entry_price:.2f}",
@@ -246,16 +258,16 @@ def render_trade_plan_batch_markdown(batch: TradePlanBatch) -> str:
     lines = [
         f"# 交易计划批次 {batch.trade_date}",
         "",
-        f"- Strategy: {batch.strategy}",
-        f"- Market: {batch.market_regime} / {batch.stance}",
-        f"- Status: {batch.status}",
-        f"- Gate: {batch.gate_status}",
-        f"- Candidates: {batch.total_candidates}",
-        f"- Plans: {batch.total_plans}",
-        f"- Planned Value: {batch.total_planned_value:.2f}",
-        f"- Allowed Value: {batch.total_allowed_value:.2f}",
+        f"- 策略：{batch.strategy}",
+        f"- 市场：{batch.market_regime} / {batch.stance}",
+        f"- 状态：{batch.status}",
+        f"- 闸门：{batch.gate_status}",
+        f"- 候选数：{batch.total_candidates}",
+        f"- 计划数：{batch.total_plans}",
+        f"- 计划金额：{batch.total_planned_value:.2f}",
+        f"- 可用金额：{batch.total_allowed_value:.2f}",
         "",
-        "## Plans",
+        "## 明细",
         "",
     ]
     for plan in batch.plans:
@@ -370,15 +382,15 @@ def render_trade_plan_summary_markdown(summary: dict[str, Any] | None) -> str:
     lines = [
         "# 交易计划汇总",
         "",
-        f"- Records: {int(summary.get('total', 0) or 0)}",
-        f"- Pass/warn/block: {int(summary.get('pass_count', 0) or 0)} / {int(summary.get('warn_count', 0) or 0)} / {int(summary.get('block_count', 0) or 0)}",
-        f"- Exceptions: {int(summary.get('exception_count', 0) or 0)}",
-        f"- Planned Value: {float(summary.get('planned_value', 0) or 0):.2f}",
-        f"- Allowed Value: {float(summary.get('allowed_value', 0) or 0):.2f}",
+        f"- 记录数：{int(summary.get('total', 0) or 0)}",
+        f"- 通过/预警/阻断：{int(summary.get('pass_count', 0) or 0)} / {int(summary.get('warn_count', 0) or 0)} / {int(summary.get('block_count', 0) or 0)}",
+        f"- 纪律例外：{int(summary.get('exception_count', 0) or 0)}",
+        f"- 计划金额：{float(summary.get('planned_value', 0) or 0):.2f}",
+        f"- 可用金额：{float(summary.get('allowed_value', 0) or 0):.2f}",
     ]
     records = list(summary.get("records", []) or [])
     if records:
-        lines.extend(["", "| Date | Symbol | Status | Gate | Planned | Entry | Exception |", "| --- | --- | --- | --- | ---: | ---: | --- |"])
+        lines.extend(["", "| 日期 | 标的 | 状态 | 闸门 | 计划仓位 | 买入价 | 例外理由 |", "| --- | --- | --- | --- | ---: | ---: | --- |"])
         for record in records:
             lines.append(
                 f"| {record.get('trade_date', record.get('date', ''))} | "
@@ -392,5 +404,55 @@ def render_trade_plan_summary_markdown(summary: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def append_trade_plan_record(path: Path, plan: TradePlan) -> None:
-    append_jsonl(path, plan.to_dict())
+def append_trade_plan_record(path: Path, plan: TradePlan | dict[str, Any], sqlite_path: Path | None = None) -> None:
+    payload = plan.to_dict() if isinstance(plan, TradePlan) else dict(plan)
+    append_jsonl(path, payload)
+    if sqlite_path is not None:
+        store = SQLiteStore(sqlite_path)
+        store.init()
+        store.insert_trade_plan(payload)
+
+
+def append_unique_trade_plan_records(
+    path: Path,
+    plans: list[TradePlan | dict[str, Any]],
+    *,
+    sqlite_path: Path | None = None,
+) -> dict[str, int]:
+    existing = read_trade_plan_records(path)
+    if sqlite_path is not None:
+        existing.extend(_sqlite_trade_plan_records(sqlite_path))
+    fingerprints = {trade_plan_fingerprint(record) for record in existing}
+    persisted_count = 0
+    skipped_existing_count = 0
+    for plan in plans:
+        payload = plan.to_dict() if isinstance(plan, TradePlan) else dict(plan)
+        fingerprint = trade_plan_fingerprint(payload)
+        if fingerprint in fingerprints:
+            skipped_existing_count += 1
+            continue
+        append_trade_plan_record(path, payload, sqlite_path=sqlite_path)
+        fingerprints.add(fingerprint)
+        persisted_count += 1
+    return {
+        "persisted_count": persisted_count,
+        "skipped_existing_count": skipped_existing_count,
+    }
+
+
+def trade_plan_fingerprint(plan: TradePlan | dict[str, Any]) -> str:
+    payload = plan.to_dict() if isinstance(plan, TradePlan) else dict(plan)
+    payload.pop("created_at", None)
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sqlite_trade_plan_records(sqlite_path: Path) -> list[dict[str, Any]]:
+    frame = SQLiteStore(sqlite_path).read_trade_plans()
+    records: list[dict[str, Any]] = []
+    for row in frame.to_dict(orient="records"):
+        try:
+            records.append(json.loads(str(row.get("payload_json", "") or "{}")))
+        except json.JSONDecodeError:
+            records.append(dict(row))
+    return records

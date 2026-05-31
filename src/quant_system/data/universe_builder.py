@@ -79,6 +79,7 @@ def normalize_universe(frame: pd.DataFrame) -> pd.DataFrame:
     result["listing_date"] = _normalize_date_column(data)
     result["industry"] = _normalize_text_column(data, ["industry", INDUSTRY, "\u884c\u4e1a"])
     result["sector"] = _normalize_text_column(data, ["sector", BOARD, CONCEPT])
+    result = result[result["symbol"].str.fullmatch(r"\d{6}", na=False)]
     return result[["symbol", "name", "market", "board", "is_st", "industry", "sector", "listing_date"]]
 
 

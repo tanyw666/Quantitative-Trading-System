@@ -56,17 +56,19 @@ def check_ohlcv_health(
     issues.append(_check_duplicates(data))
     issues.append(_check_nulls(data))
     issues.append(_check_price_sanity(data))
+    issues.append(_check_zero_volume(data))
     issues.append(_check_history_length(data, min_rows_per_symbol))
     if max_stale_days is not None:
         issues.append(_check_staleness(data, max_stale_days=max_stale_days, as_of=as_of))
 
     status = _rollup(issues)
+    valid_dates = data["date"].dropna()
     return DataHealthReport(
         status=status,
         rows=len(data),
         symbols=int(data["symbol"].nunique()),
-        start_date=data["date"].min().strftime("%Y-%m-%d"),
-        end_date=data["date"].max().strftime("%Y-%m-%d"),
+        start_date=valid_dates.min().strftime("%Y-%m-%d") if not valid_dates.empty else "",
+        end_date=valid_dates.max().strftime("%Y-%m-%d") if not valid_dates.empty else "",
         issues=issues,
     )
 
@@ -132,6 +134,8 @@ def _check_nulls(data: pd.DataFrame) -> DataHealthIssue:
 def _check_price_sanity(data: pd.DataFrame) -> DataHealthIssue:
     bad = data[
         (data["high"] < data["low"])
+        | (data["high"] < data[["open", "close"]].max(axis=1))
+        | (data["low"] > data[["open", "close"]].min(axis=1))
         | (data["close"] <= 0)
         | (data["open"] <= 0)
         | (data["high"] <= 0)
@@ -141,6 +145,41 @@ def _check_price_sanity(data: pd.DataFrame) -> DataHealthIssue:
     if not bad.empty:
         return DataHealthIssue("price_sanity", "fail", f"Found {len(bad)} rows with invalid OHLCV values.")
     return DataHealthIssue("price_sanity", "pass", "OHLCV values pass basic sanity checks.")
+
+
+def _check_zero_volume(data: pd.DataFrame) -> DataHealthIssue:
+    if "volume" not in data.columns or data.empty:
+        return DataHealthIssue("zero_volume", "pass", "No volume field to inspect.")
+    ordered = data.sort_values(["symbol", "date"])
+    volumes = pd.to_numeric(ordered["volume"], errors="coerce")
+    zero_rows = ordered[volumes.fillna(-1) <= 0]
+    if zero_rows.empty:
+        return DataHealthIssue("zero_volume", "pass", "No zero-volume OHLCV rows found.")
+
+    latest = ordered.groupby("symbol", as_index=False).tail(1)
+    latest_volumes = pd.to_numeric(latest["volume"], errors="coerce")
+    latest_zero = latest[latest_volumes.fillna(-1) <= 0]
+    historical_zero = zero_rows.drop(index=latest_zero.index, errors="ignore")
+    if not latest_zero.empty:
+        return DataHealthIssue(
+            "zero_volume",
+            "fail",
+            f"{len(latest_zero)} symbols have latest zero-volume bars; treat them as halted or not tradable.",
+            {
+                "latest_zero_count": int(len(latest_zero)),
+                "latest_zero_samples": _sample_records_with_limit(_symbol_summary(latest_zero), "rows"),
+                "historical_zero_count": int(len(historical_zero)),
+            },
+        )
+    return DataHealthIssue(
+        "zero_volume",
+        "warn",
+        f"Found {len(historical_zero)} historical zero-volume rows; verify suspensions before backtesting fills.",
+        {
+            "historical_zero_count": int(len(historical_zero)),
+            "historical_zero_samples": _sample_records_with_limit(_symbol_summary(historical_zero), "rows"),
+        },
+    )
 
 
 def _check_history_length(data: pd.DataFrame, min_rows_per_symbol: int) -> DataHealthIssue:
@@ -268,10 +307,13 @@ def _sample_records_with_limit(summary: pd.DataFrame, value_column: str, limit: 
 
 def _prepare_health_frame(frame: pd.DataFrame) -> pd.DataFrame:
     data = frame.copy()
-    data["date"] = pd.to_datetime(data["date"])
+    data["date"] = pd.to_datetime(data["date"], errors="coerce")
     if "symbol" not in data.columns:
         data["symbol"] = "SINGLE"
     data["symbol"] = data["symbol"].astype(str).str.zfill(6)
+    for column in ("open", "high", "low", "close", "volume"):
+        if column in data.columns:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
     return data
 
 

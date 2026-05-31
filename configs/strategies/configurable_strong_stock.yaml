@@ -14,3 +14,30 @@ condition:
     - field: close
       op: gte
       field_right: ma20
+    - field: ma20_slope_5
+      op: gte
+      value: 0.0
+    - field: close_to_ma20
+      op: lte
+      value: 0.45
+    - field: traded_value
+      op: gte
+      value: 20000000
+    - field: entry_structure_score
+      op: gte
+      value: 55.0
+    - field: chase_risk_score
+      op: lte
+      value: 35.0
+    - field: candle_warning_count
+      op: lte
+      value: 1
+    - field: false_breakout_flag
+      op: eq
+      value: false
+    - field: tape_distribution_warning
+      op: eq
+      value: false
+    - field: value_filter_status
+      op: neq
+      value: block

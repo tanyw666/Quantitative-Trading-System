@@ -2,20 +2,35 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from quant_system.config.settings import load_settings
 from quant_system.config.settings import SystemSettings
 from quant_system.backtest.engine import BacktestConfig, BacktestEngine
+from quant_system.backtest.reliability import (
+    BacktestReliabilityConfig,
+    build_backtest_reliability_audit,
+    render_backtest_reliability_markdown,
+)
 from quant_system.data.cache import fetch_daily_to_cache, load_daily_cache, save_daily_cache
 from quant_system.data.csv_source import read_ohlcv_csv
 from quant_system.data.dataset import load_ohlcv_dataset
 from quant_system.data.health import build_ohlcv_repair_plan, check_ohlcv_health
 from quant_system.data.manifest import CacheManifest, CacheManifestEntry
-from quant_system.data.providers import fetch_table_with_fallback, fetch_with_fallback
+from quant_system.data.providers import (
+    AkShareAdjustmentFactorProvider,
+    AkShareMinuteProvider,
+    ProviderResult,
+    fetch_table_with_fallback,
+    fetch_with_fallback,
+    minute_provider_chain,
+    provider_chain,
+)
 from quant_system.data.universe import read_universe
 from quant_system.data.universe_builder import UniverseBuildOptions, fetch_akshare_universe, filter_universe, save_universe
 from quant_system.factors.technical import add_core_factors
@@ -27,6 +42,15 @@ from quant_system.market.sectors import (
     filter_candidates_by_top_sectors,
 )
 from quant_system.optimizer.experiments import load_experiment_cases, preset_cases, run_parameter_experiments
+from quant_system.optimizer.parameter_calibration import (
+    render_calibration_markdown,
+    run_structure_parameter_calibration,
+)
+from quant_system.optimizer.strategy_portfolio_calibration import (
+    default_portfolio_calibration_variants,
+    render_strategy_portfolio_calibration_markdown,
+    run_strategy_portfolio_calibration,
+)
 from quant_system.optimizer.export_strategy import (
     load_experiment_summary,
     strategy_config_from_summary,
@@ -56,6 +80,7 @@ from quant_system.portfolio.discipline import (
 from quant_system.portfolio.discipline_adherence import evaluate_discipline_adherence
 from quant_system.portfolio.trade_plan import build_trade_plan, build_trade_plan_batch, render_trade_plan_markdown
 from quant_system.portfolio.trade_plan import (
+    append_unique_trade_plan_records,
     append_trade_plan_record,
     read_trade_plan_records,
     render_trade_plan_batch_markdown,
@@ -66,6 +91,31 @@ from quant_system.portfolio.trade_plan_audit import (
     render_trade_plan_audit_markdown,
     render_trade_plan_audit_lines,
     summarize_trade_plan_audit,
+)
+from quant_system.portfolio.execution_audit import render_execution_audit_markdown, summarize_execution_audit
+from quant_system.portfolio.approval_execution import (
+    render_approval_execution_markdown,
+    summarize_approval_execution,
+)
+from quant_system.portfolio.order_approval import (
+    append_order_approval_record,
+    build_order_approval,
+    read_order_approval_records,
+    render_order_approval_markdown,
+    render_order_approval_summary_markdown,
+    summarize_order_approvals,
+)
+from quant_system.portfolio.trading_day_state import (
+    append_trading_day_state_record,
+    apply_trading_day_template,
+    build_trading_day_state,
+    read_trading_day_state_records,
+    render_trading_day_state_history_markdown,
+    summarize_trading_day_state_records,
+)
+from quant_system.portfolio.trading_day_watchdog import (
+    build_trading_day_watchdog,
+    render_trading_day_watchdog_markdown,
 )
 from quant_system.portfolio.journal import (
     TradeJournal,
@@ -80,7 +130,11 @@ from quant_system.portfolio.lots import (
     build_lot_book,
     render_lot_book_markdown,
 )
-from quant_system.portfolio.lifecycle_pressure import build_lifecycle_pressure
+from quant_system.portfolio.lifecycle_pressure import (
+    build_lifecycle_pressure,
+    build_review_memory_pressure,
+)
+from quant_system.portfolio.lifecycle_rules import build_lifecycle_rule_plan
 from quant_system.portfolio.action_execution import (
     render_action_execution_lines,
     render_action_execution_markdown,
@@ -115,6 +169,18 @@ from quant_system.reports.discipline_summary import render_discipline_summary_li
 from quant_system.reports.experiments import ExperimentReport, build_experiment_summary_payload
 from quant_system.reports.weekly import WeeklyReport, WeeklyReportInput
 from quant_system.reports.gate_review import render_gate_review_markdown
+from quant_system.reports.review_attribution import build_review_attribution_report, render_review_attribution_markdown
+from quant_system.reports.review_history import build_review_history, render_review_history_markdown
+from quant_system.reports.review_doctor import build_review_doctor_report, render_review_doctor_markdown
+from quant_system.reports.final_battle_plan import (
+    build_final_battle_plan,
+    render_final_battle_plan_markdown,
+)
+from quant_system.reports.execution_confirm import render_execution_confirmation_markdown
+from quant_system.reports.trading_cockpit import build_trading_cockpit, render_trading_cockpit_markdown
+from quant_system.reports.trading_day_timeline import build_trading_day_timeline, render_trading_day_timeline_markdown
+from quant_system.reports.trading_assistant import build_trading_assistant, render_trading_assistant_markdown
+from quant_system.reports.daily_trade_brief import build_daily_trade_brief, render_daily_trade_brief_markdown
 from quant_system.reports.strategy_rotation import build_strategy_rotation, render_strategy_rotation_lines
 from quant_system.reports.trade_plan_summary import build_trade_plan_summary
 from quant_system.reports.rotation_history import (
@@ -127,6 +193,18 @@ from quant_system.reports.pretrade import render_precheck_markdown
 from quant_system.reports.premarket import PremarketReport, PremarketReportInput
 from quant_system.reports.position_lifecycle import build_position_lifecycle_snapshot, render_position_lifecycle_markdown
 from quant_system.risk.pretrade import run_pretrade_check
+from quant_system.risk.execution_confirm import (
+    append_execution_confirmation_record,
+    build_execution_confirmation,
+    read_execution_confirmation_records,
+)
+from quant_system.risk.approval_cooldown import (
+    build_approval_cooldown_constraints,
+    render_approval_cooldown_markdown,
+    summarize_approval_cooldown,
+)
+from quant_system.risk.attribution_policy import build_attribution_policy, render_attribution_policy_markdown
+from quant_system.risk.tradability import build_tradability_check, render_tradability_markdown
 from quant_system.risk.sizing import build_allocation_plan
 from quant_system.risk.constraint_audit import (
     build_constraint_audit_record,
@@ -138,8 +216,14 @@ from quant_system.risk.constraint_policy import apply_constraint_policy_to_healt
 from quant_system.screening.scoring import score_candidates
 from quant_system.strategies.dragon_leader import latest_dragon_diagnostics
 from quant_system.strategies.registry import create_strategy, create_strategy_from_config
+from quant_system.strategies.portfolio_manager import (
+    StrategyPortfolioConfig,
+    apply_portfolio_score_adjustment,
+    build_strategy_portfolio_plan,
+)
+from quant_system.storage.jsonl import read_jsonl
+from quant_system.storage.frame_cache import write_frame_cache
 from quant_system.storage.sqlite_store import SQLiteStore
-from quant_system.storage.jsonl import append_jsonl
 from quant_system.data.provider_health import ProviderHealthStore
 
 def fetch_akshare_universe_with_retry(attempts: int = 3, retry_sleep: float = 0.5) -> pd.DataFrame:
@@ -167,11 +251,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_dataset_args(screen)
     screen.add_argument("--strategy", default="strong_stock_screen")
     screen.add_argument("--config", type=Path, help="Strategy YAML config")
+    screen.add_argument("--portfolio-config", type=Path, help="Dynamic strategy portfolio YAML config")
     screen.add_argument("--settings", type=Path, help="System settings YAML")
     screen.add_argument("--record", action="store_true", help="Record selections")
     screen.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
     screen.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
     screen.add_argument("--top", type=int, help="Limit to top N results")
+    add_strategy_constraint_args(screen)
     add_sector_context_args(screen)
 
     dragon = subparsers.add_parser("dragon", help="Dragon strategy tools")
@@ -185,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     dragon_screen.add_argument("--top", type=int, help="Limit to top N results")
     dragon_screen.add_argument("--lookback-days", type=int, help="Limit cached history to recent calendar days before screening")
     dragon_screen.add_argument("--prefilter-symbols", type=int, default=1200, help="Preselect the most active symbols before dragon factor calculation; set 0 to disable")
+    add_strategy_constraint_args(dragon_screen)
     add_dragon_gate_arg(dragon_screen)
     add_dragon_entry_model_arg(dragon_screen)
     add_sector_context_args(dragon_screen)
@@ -197,7 +284,8 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--strategy", default="trend_breakout")
     backtest.add_argument("--config", type=Path, help="Strategy YAML config")
     backtest.add_argument("--cash", type=float, default=100000)
-    backtest.add_argument("--buy-price", choices=["close", "open"], default="close", help="Backtest buy price")
+    backtest.add_argument("--buy-price", choices=["close", "open"], default="open", help="Backtest execution price")
+    backtest.add_argument("--execution-timing", choices=["next_bar", "same_bar"], default="next_bar", help="Backtest signal execution timing")
     add_dragon_gate_arg(backtest)
     add_dragon_entry_model_arg(backtest)
 
@@ -207,8 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_dataset_args(workflow_premarket)
     workflow_premarket.add_argument("--output", type=Path, default=Path("reports/premarket.md"))
     workflow_premarket.add_argument("--summary-output", type=Path, help="Optional JSON workflow summary output")
+    workflow_premarket.add_argument("--battle-plan-output", type=Path, help="Optional final battle plan markdown output")
     workflow_premarket.add_argument("--strategy", default="strong_stock_screen")
     workflow_premarket.add_argument("--config", type=Path, help="Strategy YAML config")
+    workflow_premarket.add_argument("--portfolio-config", type=Path, help="Dynamic strategy portfolio YAML config")
     workflow_premarket.add_argument("--settings", type=Path, help="System settings YAML")
     workflow_premarket.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
     workflow_premarket.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
@@ -220,6 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_premarket.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
     workflow_premarket.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
     add_discipline_record_args(workflow_premarket)
+    add_approval_cooldown_workflow_args(workflow_premarket)
     workflow_premarket.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
     add_sector_context_args(workflow_premarket)
     workflow_premarket.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
@@ -248,6 +339,67 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_premarket.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
     workflow_premarket.add_argument("--profit-take-pct", type=float, default=0.5)
 
+    workflow_day = workflow_sub.add_parser("trading-day", help="Run the full trading-day report and audit workflow")
+    add_dataset_args(workflow_day)
+    workflow_day.add_argument("--premarket-output", type=Path, default=Path("reports/premarket.md"))
+    workflow_day.add_argument("--battle-plan-output", type=Path, default=Path("reports/final_battle_plan.md"))
+    workflow_day.add_argument("--cockpit-output", type=Path, default=Path("reports/trading_cockpit.md"))
+    workflow_day.add_argument("--execution-audit-output", type=Path, default=Path("reports/execution_audit.md"))
+    workflow_day.add_argument("--lifecycle-output", type=Path, default=Path("reports/lifecycle.md"))
+    workflow_day.add_argument("--timeline-output", type=Path, default=Path("reports/trading_timeline.md"))
+    workflow_day.add_argument("--assistant-output", type=Path, default=Path("reports/trading_assistant.md"))
+    workflow_day.add_argument("--daily-output", type=Path, default=Path("reports/today_trade_brief.md"))
+    workflow_day.add_argument("--trade-plan-batch-output", type=Path, default=Path("reports/trade_plan_batch.md"))
+    workflow_day.add_argument("--review-doctor-output", type=Path, default=Path("reports/review_doctor.md"))
+    workflow_day.add_argument("--review-attribution-output", type=Path, default=Path("reports/review_attribution.md"))
+    workflow_day.add_argument("--attribution-policy-output", type=Path, default=Path("reports/attribution_policy.md"))
+    workflow_day.add_argument("--summary-output", type=Path, default=Path("reports/trading_day_workflow.json"))
+    workflow_day.add_argument("--strategy", default="strong_stock_screen")
+    workflow_day.add_argument("--config", type=Path, help="Strategy YAML config")
+    workflow_day.add_argument("--portfolio-config", type=Path, help="Dynamic strategy portfolio YAML config")
+    workflow_day.add_argument("--settings", type=Path, help="System settings YAML")
+    workflow_day.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    workflow_day.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    workflow_day.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    workflow_day.add_argument("--top", type=int, default=5)
+    workflow_day.add_argument("--cash", type=float, default=100000)
+    workflow_day.add_argument("--max-positions", type=int, default=5)
+    workflow_day.add_argument("--experiment-summary", type=Path, help="Experiment summary JSON")
+    workflow_day.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
+    workflow_day.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    add_discipline_record_args(workflow_day)
+    add_trading_day_state_args(workflow_day)
+    add_approval_cooldown_workflow_args(workflow_day)
+    workflow_day.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    add_sector_context_args(workflow_day)
+    workflow_day.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    workflow_day.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    workflow_day.add_argument("--max-exposure-pct", type=float, default=0.8)
+    workflow_day.add_argument("--max-position-pct", type=float, default=0.2)
+    workflow_day.add_argument("--strict", action="store_true", help="Fail health loading on missing cache entries")
+    workflow_day.add_argument("--min-rows", type=int, default=30)
+    workflow_day.add_argument("--max-stale-days", type=int, default=10)
+    workflow_day.add_argument("--as-of", help="Health check reference date, e.g. 2026-05-29")
+    workflow_day.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    workflow_day.add_argument("--record-actions", action="store_true", help="Persist generated holding action plan")
+    workflow_day.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    workflow_day.add_argument("--record-exit-plan", action="store_true", help="Persist generated exit plan")
+    workflow_day.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    workflow_day.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    workflow_day.add_argument("--max-holding-days", type=int, default=20)
+    workflow_day.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    workflow_day.add_argument("--profit-take-pct", type=float, default=0.5)
+    workflow_day.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    workflow_day.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    workflow_day.add_argument("--record-trade-plans", action="store_true", help="Persist generated trade-plan batch with duplicate suppression")
+    workflow_day.add_argument("--lookahead-days", type=int, default=1)
+    workflow_day.add_argument("--repeat-threshold", type=int, default=2)
+    workflow_day.add_argument("--stale-days", type=int, default=1)
+    workflow_day.add_argument("--record-attribution-policy", action="store_true", help="Persist attribution-derived constraints and discipline record")
+    workflow_day.add_argument("--attribution-policy-date", default="", help="Next-session date for attribution-derived constraints")
+
+    workflow_daily = workflow_sub.add_parser("daily", parents=[workflow_day], add_help=False, help="Shortcut for the full daily trading workflow")
+
     report = subparsers.add_parser("report", help="Generate reports")
     report_sub = report.add_subparsers(dest="report_command", required=True)
     daily = report_sub.add_parser("daily", help="Generate daily markdown report")
@@ -255,6 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_dataset_args(daily)
     daily.add_argument("--strategy", default="strong_stock_screen")
     daily.add_argument("--config", type=Path, help="Strategy YAML config")
+    daily.add_argument("--portfolio-config", type=Path, help="Dynamic strategy portfolio YAML config")
     daily.add_argument("--settings", type=Path, help="System settings YAML")
     daily.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
     daily.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
@@ -280,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--horizons", default="1,3,5")
     weekly.add_argument("--strategy", default="strong_stock_screen")
     weekly.add_argument("--config", type=Path, help="Strategy YAML config")
+    weekly.add_argument("--portfolio-config", type=Path, help="Dynamic strategy portfolio YAML config")
     weekly.add_argument("--settings", type=Path, help="System settings YAML")
     weekly.add_argument("--experiment-summary", type=Path, help="Experiment summary JSON")
     weekly.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
@@ -348,6 +502,140 @@ def build_parser() -> argparse.ArgumentParser:
     premarket.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
     premarket.add_argument("--profit-take-pct", type=float, default=0.5)
 
+    battle_plan = report_sub.add_parser("battle-plan", help="Generate final pretrade battle plan")
+    battle_plan.add_argument("--output", type=Path, default=Path("reports/final_battle_plan.md"))
+    battle_plan.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    add_dataset_args(battle_plan)
+    battle_plan.add_argument("--strategy", default="strong_stock_screen")
+    battle_plan.add_argument("--config", type=Path, help="Strategy YAML config")
+    battle_plan.add_argument("--settings", type=Path, help="System settings YAML")
+    battle_plan.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    battle_plan.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    battle_plan.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    battle_plan.add_argument("--top", type=int, default=5)
+    battle_plan.add_argument("--cash", type=float, default=100000)
+    battle_plan.add_argument("--max-positions", type=int, default=5)
+    battle_plan.add_argument("--experiment-summary", type=Path, help="Experiment summary JSON")
+    battle_plan.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
+    battle_plan.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    add_discipline_record_args(battle_plan)
+    battle_plan.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    battle_plan.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    battle_plan.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    add_sector_context_args(battle_plan)
+    battle_plan.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    battle_plan.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    battle_plan.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    battle_plan.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    battle_plan.add_argument("--max-exposure-pct", type=float, default=0.8)
+    battle_plan.add_argument("--max-position-pct", type=float, default=0.2)
+    battle_plan.add_argument("--max-holding-days", type=int, default=20)
+    battle_plan.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    battle_plan.add_argument("--profit-take-pct", type=float, default=0.5)
+
+    cockpit = report_sub.add_parser("cockpit", help="Generate a unified live trading cockpit")
+    cockpit.add_argument("--output", type=Path, default=Path("reports/trading_cockpit.md"))
+    cockpit.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    add_dataset_args(cockpit)
+    cockpit.add_argument("--strategy", default="strong_stock_screen")
+    cockpit.add_argument("--config", type=Path, help="Strategy YAML config")
+    cockpit.add_argument("--settings", type=Path, help="System settings YAML")
+    cockpit.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    cockpit.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    cockpit.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    cockpit.add_argument("--top", type=int, default=5)
+    cockpit.add_argument("--cash", type=float, default=100000)
+    cockpit.add_argument("--max-positions", type=int, default=5)
+    cockpit.add_argument("--experiment-summary", type=Path, help="Experiment summary JSON")
+    cockpit.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
+    cockpit.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    cockpit.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    cockpit.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    cockpit.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    cockpit.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    add_sector_context_args(cockpit)
+    cockpit.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    cockpit.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    cockpit.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    cockpit.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    cockpit.add_argument("--max-exposure-pct", type=float, default=0.8)
+    cockpit.add_argument("--max-position-pct", type=float, default=0.2)
+    cockpit.add_argument("--max-holding-days", type=int, default=20)
+    cockpit.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    cockpit.add_argument("--profit-take-pct", type=float, default=0.5)
+    cockpit.add_argument("--lookahead-days", type=int, default=1)
+
+    timeline = report_sub.add_parser("timeline", help="Generate trading-day phase reminders")
+    timeline.add_argument("--output", type=Path, default=Path("reports/trading_timeline.md"))
+    timeline.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    add_dataset_args(timeline)
+    timeline.add_argument("--strategy", default="strong_stock_screen")
+    timeline.add_argument("--config", type=Path, help="Strategy YAML config")
+    timeline.add_argument("--settings", type=Path, help="System settings YAML")
+    timeline.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    timeline.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    timeline.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    timeline.add_argument("--top", type=int, default=5)
+    timeline.add_argument("--cash", type=float, default=100000)
+    timeline.add_argument("--max-positions", type=int, default=5)
+    timeline.add_argument("--experiment-summary", type=Path, help="Experiment summary JSON")
+    timeline.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
+    timeline.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    timeline.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    timeline.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    timeline.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    timeline.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    add_sector_context_args(timeline)
+    timeline.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    timeline.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    timeline.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    timeline.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    timeline.add_argument("--max-exposure-pct", type=float, default=0.8)
+    timeline.add_argument("--max-position-pct", type=float, default=0.2)
+    timeline.add_argument("--max-holding-days", type=int, default=20)
+    timeline.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    timeline.add_argument("--profit-take-pct", type=float, default=0.5)
+    timeline.add_argument("--lookahead-days", type=int, default=1)
+    timeline.add_argument("--as-of", help="Optional current timestamp/date for phase reminders")
+    add_trading_day_state_args(timeline)
+
+    assistant = report_sub.add_parser("assistant", help="Generate one-page trading assistant panel")
+    assistant.add_argument("--output", type=Path, default=Path("reports/trading_assistant.md"))
+    assistant.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    add_dataset_args(assistant)
+    assistant.add_argument("--strategy", default="strong_stock_screen")
+    assistant.add_argument("--config", type=Path, help="Strategy YAML config")
+    assistant.add_argument("--settings", type=Path, help="System settings YAML")
+    assistant.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    assistant.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    assistant.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    assistant.add_argument("--top", type=int, default=5)
+    assistant.add_argument("--cash", type=float, default=100000)
+    assistant.add_argument("--max-positions", type=int, default=5)
+    assistant.add_argument("--experiment-summary", type=Path, help="Experiment summary JSON")
+    assistant.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
+    assistant.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    assistant.add_argument("--rotation-snapshot-dir", type=Path, default=Path("reports/rotation_snapshots"))
+    assistant.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    assistant.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    assistant.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    assistant.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    add_sector_context_args(assistant)
+    assistant.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    assistant.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
+    assistant.add_argument("--target", action="append", default=[], help="Target price, symbol=price")
+    assistant.add_argument("--invalidate", action="append", default=[], help="Invalidated thesis, symbol=reason")
+    assistant.add_argument("--max-exposure-pct", type=float, default=0.8)
+    assistant.add_argument("--max-position-pct", type=float, default=0.2)
+    assistant.add_argument("--max-holding-days", type=int, default=20)
+    assistant.add_argument("--time-stop-min-return-pct", type=float, default=0.0)
+    assistant.add_argument("--profit-take-pct", type=float, default=0.5)
+    assistant.add_argument("--lookahead-days", type=int, default=1)
+    assistant.add_argument("--as-of", help="Optional current timestamp/date for assistant")
+    assistant.add_argument("--repeat-threshold", type=int, default=2)
+    assistant.add_argument("--stale-days", type=int, default=1)
+    add_trading_day_state_args(assistant)
+
     dragon_report = report_sub.add_parser("dragon", help="Generate dragon validation report")
     dragon_report.add_argument("--output", type=Path, default=Path("reports/dragon_validation.md"))
     add_dataset_args(dragon_report)
@@ -355,7 +643,8 @@ def build_parser() -> argparse.ArgumentParser:
     dragon_report.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
     dragon_report.add_argument("--horizons", default="1,3,5")
     dragon_report.add_argument("--cash", type=float, default=100000)
-    dragon_report.add_argument("--buy-price", choices=["close", "open"], default="close", help="Backtest buy price")
+    dragon_report.add_argument("--buy-price", choices=["close", "open"], default="open", help="Backtest execution price")
+    dragon_report.add_argument("--execution-timing", choices=["next_bar", "same_bar"], default="next_bar", help="Backtest signal execution timing")
     dragon_report.add_argument("--top", type=int, default=10, help="Limit current dragon candidates shown in the report")
     dragon_report.add_argument("--lookback-days", type=int, help="Limit cached history to recent calendar days before dragon validation")
     dragon_report.add_argument("--prefilter-symbols", type=int, default=1200, help="Preselect the most active symbols before dragon factor calculation; set 0 to disable")
@@ -447,12 +736,88 @@ def build_parser() -> argparse.ArgumentParser:
     db_import_daily.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"])
     db_import_daily.add_argument("--source", default="akshare", choices=["auto", "mootdx", "tencent", "akshare", "sina"])
 
+    db_import_batch_daily = db_sub.add_parser("import-batch-daily", help="Import daily bars for a universe into SQLite")
+    db_import_batch_daily.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_import_batch_daily.add_argument("--universe", type=Path, help="Universe CSV path; defaults to SQLite universe table")
+    db_import_batch_daily.add_argument("--start", required=True)
+    db_import_batch_daily.add_argument("--end", required=True)
+    db_import_batch_daily.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"])
+    db_import_batch_daily.add_argument("--source", default="auto", choices=["auto", "mootdx", "tencent", "akshare", "sina"])
+    db_import_batch_daily.add_argument("--limit", type=int, help="Limit the number of symbols")
+    db_import_batch_daily.add_argument("--workers", type=int, default=8, help="Parallel fetch workers")
+    db_import_batch_daily.add_argument("--progress-every", type=int, default=100, help="Print progress every N symbols")
+    db_import_batch_daily.add_argument("--refresh", action="store_true", help="Refetch symbols even when SQLite already covers the requested date range")
+    db_import_batch_daily.add_argument("--include-st", action="store_true", help="When auto-building universe, include ST stocks")
+    db_import_batch_daily.add_argument("--include-bj", action="store_true", help="When auto-building universe, include Beijing Stock Exchange stocks")
+
+    db_import_adjustment = db_sub.add_parser("import-adjustment", help="Import one symbol's adjustment factors")
+    db_import_adjustment.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_import_adjustment.add_argument("--symbol", required=True)
+    db_import_adjustment.add_argument("--start", required=True)
+    db_import_adjustment.add_argument("--end", required=True)
+    db_import_adjustment.add_argument("--adjust", default="qfq", choices=["qfq", "hfq"])
+
+    db_import_batch_adjustment = db_sub.add_parser("import-batch-adjustment", help="Import adjustment factors for a universe")
+    db_import_batch_adjustment.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_import_batch_adjustment.add_argument("--universe", type=Path, help="Universe CSV path; defaults to SQLite universe table")
+    db_import_batch_adjustment.add_argument("--start", required=True)
+    db_import_batch_adjustment.add_argument("--end", required=True)
+    db_import_batch_adjustment.add_argument("--adjust", default="qfq", choices=["qfq", "hfq"])
+    db_import_batch_adjustment.add_argument("--limit", type=int, help="Limit the number of symbols")
+    db_import_batch_adjustment.add_argument("--workers", type=int, default=4, help="Parallel fetch workers")
+    db_import_batch_adjustment.add_argument("--progress-every", type=int, default=100, help="Print progress every N symbols")
+    db_import_batch_adjustment.add_argument("--refresh", action="store_true", help="Refetch symbols even when factors already exist")
+    db_import_batch_adjustment.add_argument("--include-st", action="store_true", help="When auto-building universe, include ST stocks")
+    db_import_batch_adjustment.add_argument("--include-bj", action="store_true", help="When auto-building universe, include Beijing Stock Exchange stocks")
+
+    db_import_minute = db_sub.add_parser("import-minute", help="Fetch minute bars into local Parquet cache and SQLite catalog")
+    db_import_minute.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_import_minute.add_argument("--symbol", required=True)
+    db_import_minute.add_argument("--start", required=True, help="Start datetime, e.g. 2025-01-02 09:30:00")
+    db_import_minute.add_argument("--end", required=True, help="End datetime, e.g. 2025-01-02 15:00:00")
+    db_import_minute.add_argument("--period", default="1", choices=["1", "5", "15", "30", "60"])
+    db_import_minute.add_argument("--adjust", default="", choices=["", "qfq", "hfq"])
+    db_import_minute.add_argument("--source", default="auto", choices=["auto", "akshare-minute", "tencent-minute"])
+    db_import_minute.add_argument("--cache-dir", type=Path, default=Path("data/cache/minute"))
+
+    db_import_batch_minute = db_sub.add_parser("import-batch-minute", help="Fetch minute bars for a universe into local cache and SQLite catalog")
+    db_import_batch_minute.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_import_batch_minute.add_argument("--universe", type=Path, help="Universe CSV path; defaults to SQLite universe table")
+    db_import_batch_minute.add_argument("--start", required=True, help="Start datetime, e.g. 2026-05-25 09:30:00")
+    db_import_batch_minute.add_argument("--end", required=True, help="End datetime, e.g. 2026-05-29 15:00:00")
+    db_import_batch_minute.add_argument("--period", default="1", choices=["1", "5", "15", "30", "60"])
+    db_import_batch_minute.add_argument("--adjust", default="", choices=["", "qfq", "hfq"])
+    db_import_batch_minute.add_argument("--source", default="auto", choices=["auto", "akshare-minute", "tencent-minute"])
+    db_import_batch_minute.add_argument("--cache-dir", type=Path, default=Path("data/cache/minute"))
+    db_import_batch_minute.add_argument("--limit", type=int, help="Limit the number of symbols")
+    db_import_batch_minute.add_argument("--workers", type=int, default=2, help="Parallel fetch workers")
+    db_import_batch_minute.add_argument("--progress-every", type=int, default=20, help="Print progress every N symbols")
+    db_import_batch_minute.add_argument("--refresh", action="store_true", help="Refetch chunks even when catalog already covers them")
+    db_import_batch_minute.add_argument("--include-st", action="store_true", help="When auto-building universe, include ST stocks")
+    db_import_batch_minute.add_argument("--include-bj", action="store_true", help="When auto-building universe, include Beijing Stock Exchange stocks")
+
+    db_import_review = db_sub.add_parser("import-review", help="Import historical review JSONL logs into SQLite")
+    db_import_review.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_import_review.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    db_import_review.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    db_import_review.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"))
+    db_import_review.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    db_import_review.add_argument("--discipline-log", type=Path, default=Path("data/review/discipline.jsonl"))
+    db_import_review.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    db_import_review.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    db_import_review.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    db_import_review.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    db_import_review.add_argument("--lifecycle-log", type=Path, default=Path("data/review/lifecycle_snapshots.jsonl"))
+    db_import_review.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+    db_import_review.add_argument("--approval-log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+
     db_screen = db_sub.add_parser("screen", help="Run screening on SQLite data")
     db_screen.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
     db_screen.add_argument("--strategy", default="strong_stock_screen")
     db_screen.add_argument("--config", type=Path, help="Strategy YAML config")
     db_screen.add_argument("--settings", type=Path, help="System settings YAML")
     db_screen.add_argument("--top", type=int, help="Limit to top N results")
+    add_strategy_constraint_args(db_screen)
     add_sector_context_args(db_screen)
     add_dragon_gate_arg(db_screen)
     add_dragon_entry_model_arg(db_screen)
@@ -462,6 +827,13 @@ def build_parser() -> argparse.ArgumentParser:
     db_health.add_argument("--min-rows", type=int, default=30)
     db_health.add_argument("--max-stale-days", type=int)
     db_health.add_argument("--as-of", help="Health check reference date, e.g. 2026-05-28")
+    db_doctor = db_sub.add_parser("doctor", help="Check review-ledger completeness in SQLite")
+    db_doctor.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_doctor.add_argument("--format", choices=["json", "markdown"], default="json")
+    db_doctor.add_argument("--output", type=Path, help="Optional output path")
+    db_catalog = db_sub.add_parser("catalog", help="Show market-data coverage in SQLite and minute cache catalog")
+    db_catalog.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
+    db_catalog.add_argument("--format", choices=["json", "markdown"], default="json")
     db_sources = db_sub.add_parser("sources", help="Show configured data sources")
     db_sources.add_argument("--settings", type=Path, help="System settings YAML")
 
@@ -500,6 +872,8 @@ def build_parser() -> argparse.ArgumentParser:
     trade_add.add_argument("--review", default="")
     trade_add.add_argument("--workflow-summary", type=Path, help="Premarket workflow JSON summary to attach gate status")
     trade_add.add_argument("--trade-plan", type=Path, help="Trade plan JSON produced by portfolio plan")
+    trade_add.add_argument("--execution-confirm", type=Path, help="Execution confirmation JSON produced by portfolio confirm")
+    trade_add.add_argument("--order-approval", type=Path, help="Final order approval JSON produced by portfolio approve")
     trade_add.add_argument("--gate-status", choices=["pass", "warn", "block"], default="")
     trade_add.add_argument("--gate-message", default="")
     trade_add.add_argument("--gate-reason", action="append", default=[], help="Gate reason, repeatable")
@@ -545,6 +919,97 @@ def build_parser() -> argparse.ArgumentParser:
     trade_audit.add_argument("--format", choices=["json", "markdown"], default="json")
     trade_audit.add_argument("--output", type=Path, help="Optional output path")
 
+    execution_audit = review_sub.add_parser("execution-audit", help="Audit intraday execution confirmations against actual buy trades")
+    execution_audit.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    execution_audit.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    execution_audit.add_argument("--sqlite", type=Path, help="Optional SQLite store path for confirmations and trades")
+    execution_audit.add_argument("--lookahead-days", type=int, default=1)
+    execution_audit.add_argument("--limit", type=int, default=20, help="Show at most N recent records")
+    execution_audit.add_argument("--format", choices=["json", "markdown"], default="json")
+    execution_audit.add_argument("--output", type=Path, help="Optional output path")
+
+    approval_audit = review_sub.add_parser("approval-audit", help="Audit final order approvals against actual BUY trades")
+    approval_audit.add_argument("--approval-log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    approval_audit.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    approval_audit.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    approval_audit.add_argument("--sqlite", type=Path, help="Optional SQLite store path for approvals and trades")
+    approval_audit.add_argument("--lookahead-days", type=int, default=1)
+    approval_audit.add_argument("--value-tolerance-pct", type=float, default=0.02)
+    approval_audit.add_argument("--limit", type=int, default=20, help="Show at most N recent records")
+    approval_audit.add_argument("--format", choices=["json", "markdown"], default="json")
+    approval_audit.add_argument("--output", type=Path, help="Optional output path")
+
+    approval_cooldown = review_sub.add_parser("approval-cooldown", help="Turn approval audit violations into strategy cooldown constraints")
+    approval_cooldown.add_argument("--approval-log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    approval_cooldown.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    approval_cooldown.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    approval_cooldown.add_argument("--sqlite", type=Path, help="Optional SQLite store path for approvals/trades/constraints")
+    approval_cooldown.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    approval_cooldown.add_argument("--lookahead-days", type=int, default=1)
+    approval_cooldown.add_argument("--value-tolerance-pct", type=float, default=0.02)
+    approval_cooldown.add_argument("--block-threshold", type=int, default=1)
+    approval_cooldown.add_argument("--warn-threshold", type=int, default=2)
+    approval_cooldown.add_argument("--fallback-threshold", type=int, default=2)
+    approval_cooldown.add_argument("--warn-exposure-multiplier", type=float, default=0.5)
+    approval_cooldown.add_argument("--limit", type=int, default=20)
+    approval_cooldown.add_argument("--record", action="store_true", help="Persist generated cooldown constraints into JSONL and optional SQLite")
+    approval_cooldown.add_argument("--format", choices=["json", "markdown"], default="json")
+    approval_cooldown.add_argument("--output", type=Path, help="Optional output path")
+
+    review_attribution = review_sub.add_parser("attribution", help="Attribute root causes across plan, execution, approval, and lifecycle reviews")
+    review_attribution.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    review_attribution.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    review_attribution.add_argument("--plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    review_attribution.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    review_attribution.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    review_attribution.add_argument("--approval-log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    review_attribution.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    review_attribution.add_argument("--lifecycle-log", type=Path, default=Path("data/review/lifecycle_snapshots.jsonl"))
+    review_attribution.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+    review_attribution.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    review_attribution.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    review_attribution.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    review_attribution.add_argument("--lookahead-days", type=int, default=1)
+    review_attribution.add_argument("--value-tolerance-pct", type=float, default=0.02)
+    review_attribution.add_argument("--block-threshold", type=int, default=1)
+    review_attribution.add_argument("--warn-threshold", type=int, default=2)
+    review_attribution.add_argument("--fallback-threshold", type=int, default=2)
+    review_attribution.add_argument("--warn-exposure-multiplier", type=float, default=0.5)
+    review_attribution.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    review_attribution.add_argument("--as-of", help="Snapshot date, defaults to today")
+    review_attribution.add_argument("--limit", type=int, default=12, help="Show at most N root causes")
+    review_attribution.add_argument("--format", choices=["json", "markdown"], default="json")
+    review_attribution.add_argument("--output", type=Path, help="Optional output path")
+
+    attribution_policy = review_sub.add_parser("attribution-policy", help="Convert review attribution into next-session constraints and discipline advice")
+    attribution_policy.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
+    attribution_policy.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    attribution_policy.add_argument("--plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    attribution_policy.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    attribution_policy.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    attribution_policy.add_argument("--approval-log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    attribution_policy.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    attribution_policy.add_argument("--discipline-log", type=Path, default=Path("data/review/discipline.jsonl"))
+    attribution_policy.add_argument("--lifecycle-log", type=Path, default=Path("data/review/lifecycle_snapshots.jsonl"))
+    attribution_policy.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+    attribution_policy.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    attribution_policy.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    attribution_policy.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    attribution_policy.add_argument("--lookahead-days", type=int, default=1)
+    attribution_policy.add_argument("--value-tolerance-pct", type=float, default=0.02)
+    attribution_policy.add_argument("--block-threshold", type=int, default=1)
+    attribution_policy.add_argument("--warn-threshold", type=int, default=2)
+    attribution_policy.add_argument("--fallback-threshold", type=int, default=2)
+    attribution_policy.add_argument("--warn-exposure-multiplier", type=float, default=0.5)
+    attribution_policy.add_argument("--default-strategy", default="manual_order")
+    attribution_policy.add_argument("--effective-date", default="", help="Next-session date for generated constraints")
+    attribution_policy.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    attribution_policy.add_argument("--as-of", help="Snapshot date, defaults to today")
+    attribution_policy.add_argument("--limit", type=int, default=12, help="Show at most N root causes")
+    attribution_policy.add_argument("--record", action="store_true", help="Persist generated constraints and discipline record")
+    attribution_policy.add_argument("--format", choices=["json", "markdown"], default="json")
+    attribution_policy.add_argument("--output", type=Path, help="Optional output path")
+
     action_execution = review_sub.add_parser("action-execution", help="Audit holding action plans against actual trades")
     action_execution.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
     action_execution.add_argument("--trade-log", type=Path, default=Path("data/review/trades.jsonl"))
@@ -583,7 +1048,9 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle_review = review_sub.add_parser("lifecycle", help="Summarize full position lifecycle and execution closure")
     lifecycle_review.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
     lifecycle_review.add_argument("--sqlite", type=Path, help="Optional SQLite store path for trades")
+    lifecycle_review.add_argument("--cash", type=float, default=100000)
     lifecycle_review.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    lifecycle_review.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
     lifecycle_review.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
     lifecycle_review.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
     lifecycle_review.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
@@ -592,6 +1059,57 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle_review.add_argument("--limit", type=int, default=20)
     lifecycle_review.add_argument("--format", choices=["json", "markdown"], default="json")
     lifecycle_review.add_argument("--output", type=Path, help="Optional output path")
+    lifecycle_review.add_argument("--max-probe-pct", type=float, default=0.05)
+    lifecycle_review.add_argument("--max-position-pct", type=float, default=0.2)
+    lifecycle_review.add_argument("--add-step-pct", type=float, default=0.05)
+    lifecycle_review.add_argument("--add-profit-trigger-pct", type=float, default=0.03)
+    lifecycle_review.add_argument("--reduce-loss-warning-pct", type=float, default=0.03)
+    lifecycle_history = review_sub.add_parser("lifecycle-history", help="Summarize persisted review/lifecycle history")
+    lifecycle_history.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    lifecycle_history.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    lifecycle_history.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    lifecycle_history.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    lifecycle_history.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    lifecycle_history.add_argument("--lifecycle-log", type=Path, default=Path("data/review/lifecycle_snapshots.jsonl"))
+    lifecycle_history.add_argument("--limit", type=int, default=20)
+    lifecycle_history.add_argument("--format", choices=["json", "markdown"], default="json")
+    lifecycle_history.add_argument("--output", type=Path, help="Optional output path")
+    timeline_history = review_sub.add_parser("timeline-history", help="Summarize persisted trading-day phase states")
+    timeline_history.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+    timeline_history.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    timeline_history.add_argument("--limit", type=int, default=20)
+    timeline_history.add_argument("--format", choices=["json", "markdown"], default="json")
+    timeline_history.add_argument("--output", type=Path, help="Optional output path")
+    timeline_watch = review_sub.add_parser("timeline-watch", help="Watch trading-day state gaps and repeated phase issues")
+    timeline_watch.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+    timeline_watch.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    timeline_watch.add_argument("--as-of", help="Reference date, defaults to today")
+    timeline_watch.add_argument("--repeat-threshold", type=int, default=2)
+    timeline_watch.add_argument("--stale-days", type=int, default=1)
+    timeline_watch.add_argument("--limit", type=int, default=20)
+    timeline_watch.add_argument("--format", choices=["json", "markdown"], default="json")
+    timeline_watch.add_argument("--output", type=Path, help="Optional output path")
+    review_doctor = review_sub.add_parser("doctor", help="Check review-ledger completeness across JSONL or SQLite")
+    review_doctor.add_argument("--tracker", type=Path, default=Path("data/review/selections.jsonl"))
+    review_doctor.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    review_doctor.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
+    review_doctor.add_argument("--confirm-log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    review_doctor.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
+    review_doctor.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
+    review_doctor.add_argument("--lifecycle-log", type=Path, default=Path("data/review/lifecycle_snapshots.jsonl"))
+    review_doctor.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+    review_doctor.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    review_doctor.add_argument("--format", choices=["json", "markdown"], default="json")
+    review_doctor.add_argument("--output", type=Path, help="Optional output path")
+
+    approvals = review_sub.add_parser("approvals", help="Summarize persisted final order approvals")
+    approvals.add_argument("--log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    approvals.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    approvals.add_argument("--limit", type=int, default=20)
+    approvals.add_argument("--symbol", default="", help="Optional symbol filter")
+    approvals.add_argument("--status", default="", choices=["", "pass", "warn", "block"], help="Optional status filter")
+    approvals.add_argument("--format", choices=["json", "markdown"], default="json")
+    approvals.add_argument("--output", type=Path, help="Optional output path")
 
     promotions = review_sub.add_parser("promotions", help="Summarize strategy promotion history")
     promotions.add_argument("--log", type=Path, default=Path("data/review/promotions.jsonl"))
@@ -665,6 +1183,94 @@ def build_parser() -> argparse.ArgumentParser:
     precheck.add_argument("--format", choices=["json", "markdown"], default="json")
     add_sector_context_args(precheck)
 
+    confirm = portfolio_sub.add_parser("confirm", help="Final intraday buy confirmation before manual order entry")
+    add_dataset_args(confirm)
+    confirm.add_argument("--symbol", required=True)
+    confirm.add_argument("--current-price", type=float, required=True)
+    confirm.add_argument("--planned-pct", type=float, required=True)
+    confirm.add_argument("--stop-price", type=float)
+    confirm.add_argument("--target-price", type=float)
+    confirm.add_argument("--reference-price", type=float, help="Optional planned/reference entry price for chase control")
+    confirm.add_argument("--battle-plan", type=Path, help="Optional JSON final battle plan generated by report battle-plan --format json")
+    confirm.add_argument("--strategy", default="strong_stock_screen")
+    confirm.add_argument("--config", type=Path, help="Strategy YAML config")
+    confirm.add_argument("--settings", type=Path, help="System settings YAML")
+    confirm.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    confirm.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    confirm.add_argument("--cash", type=float, default=100000)
+    confirm.add_argument("--top", type=int, default=5)
+    confirm.add_argument("--warn-scale", type=float, default=0.5)
+    confirm.add_argument("--max-price-deviation-pct", type=float, default=0.015)
+    confirm.add_argument("--hard-chase-pct", type=float, default=0.03)
+    confirm.add_argument("--lot-size", type=int, default=100)
+    confirm.add_argument("--log", type=Path, default=Path("data/review/execution_confirms.jsonl"))
+    confirm.add_argument("--record", action="store_true", help="Append the confirmation result to JSONL and optional SQLite for later execution audit")
+    confirm.add_argument("--format", choices=["json", "markdown"], default="json")
+    confirm.add_argument("--output", type=Path, help="Optional output path")
+    add_sector_context_args(confirm)
+    tradable = portfolio_sub.add_parser("tradable", help="Hard tradability gate before placing a manual order")
+    add_dataset_args(tradable)
+    tradable.add_argument("--symbol", required=True)
+    tradable.add_argument("--current-price", type=float, required=True)
+    tradable.add_argument("--planned-pct", type=float, required=True)
+    tradable.add_argument("--stop-price", type=float)
+    tradable.add_argument("--target-price", type=float)
+    tradable.add_argument("--reference-price", type=float, help="Optional planned/reference entry price for chase control")
+    tradable.add_argument("--strategy", default="strong_stock_screen")
+    tradable.add_argument("--config", type=Path, help="Strategy YAML config")
+    tradable.add_argument("--settings", type=Path, help="System settings YAML")
+    tradable.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    tradable.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    tradable.add_argument("--cash", type=float, default=100000)
+    tradable.add_argument("--top", type=int, default=5)
+    tradable.add_argument("--battle-plan", type=Path, help="Optional JSON final battle plan generated by report battle-plan --format json")
+    tradable.add_argument("--execution-confirm", type=Path, help="Optional execution confirmation JSON")
+    tradable.add_argument("--pretrade-json", type=Path, help="Optional pretrade result JSON")
+    tradable.add_argument("--as-of", help="Reference date, defaults to today")
+    tradable.add_argument("--max-stale-days", type=int, default=1)
+    tradable.add_argument("--limit-pct", type=float, default=0.10)
+    tradable.add_argument("--limit-buffer-pct", type=float, default=0.002)
+    tradable.add_argument("--lot-size", type=int, default=100)
+    tradable.add_argument("--warn-scale", type=float, default=0.5)
+    tradable.add_argument("--max-price-deviation-pct", type=float, default=0.015)
+    tradable.add_argument("--hard-chase-pct", type=float, default=0.03)
+    tradable.add_argument("--format", choices=["json", "markdown"], default="json")
+    tradable.add_argument("--output", type=Path, help="Optional output path")
+    add_sector_context_args(tradable)
+
+    approve = portfolio_sub.add_parser("approve", help="Generate final order approval from assistant, battle, pretrade, confirmation, and tradability gates")
+    add_dataset_args(approve)
+    approve.add_argument("--symbol", required=True)
+    approve.add_argument("--current-price", type=float, required=True)
+    approve.add_argument("--planned-pct", type=float, required=True)
+    approve.add_argument("--stop-price", type=float)
+    approve.add_argument("--target-price", type=float)
+    approve.add_argument("--reference-price", type=float, help="Optional planned/reference entry price for chase control")
+    approve.add_argument("--strategy", default="strong_stock_screen")
+    approve.add_argument("--config", type=Path, help="Strategy YAML config")
+    approve.add_argument("--settings", type=Path, help="System settings YAML")
+    approve.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    approve.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    approve.add_argument("--cash", type=float, default=100000)
+    approve.add_argument("--top", type=int, default=5)
+    approve.add_argument("--battle-plan", type=Path, help="Optional JSON final battle plan generated by report battle-plan --format json")
+    approve.add_argument("--execution-confirm", type=Path, help="Optional execution confirmation JSON")
+    approve.add_argument("--pretrade-json", type=Path, help="Optional pretrade result JSON")
+    approve.add_argument("--assistant-json", type=Path, help="Optional trading assistant JSON")
+    approve.add_argument("--as-of", help="Reference date, defaults to today")
+    approve.add_argument("--max-stale-days", type=int, default=1)
+    approve.add_argument("--limit-pct", type=float, default=0.10)
+    approve.add_argument("--limit-buffer-pct", type=float, default=0.002)
+    approve.add_argument("--lot-size", type=int, default=100)
+    approve.add_argument("--warn-scale", type=float, default=0.5)
+    approve.add_argument("--max-price-deviation-pct", type=float, default=0.015)
+    approve.add_argument("--hard-chase-pct", type=float, default=0.03)
+    approve.add_argument("--log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    approve.add_argument("--record", action="store_true", help="Append the final approval to JSONL and optional SQLite")
+    approve.add_argument("--format", choices=["json", "markdown"], default="json")
+    approve.add_argument("--output", type=Path, help="Optional output path")
+    add_sector_context_args(approve)
+
     positions = portfolio_sub.add_parser("positions", help="Rebuild current positions from trade journal")
     positions.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
     positions.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
@@ -684,7 +1290,9 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle = portfolio_sub.add_parser("lifecycle", help="Build a unified position lifecycle snapshot")
     lifecycle.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
     lifecycle.add_argument("--sqlite", type=Path, help="Optional SQLite store path")
+    lifecycle.add_argument("--cash", type=float, default=100000)
     lifecycle.add_argument("--price", action="append", default=[], help="Current price, symbol=price")
+    lifecycle.add_argument("--stop", action="append", default=[], help="Stop price, symbol=price")
     lifecycle.add_argument("--action-log", type=Path, default=Path("data/review/position_actions.jsonl"))
     lifecycle.add_argument("--exit-log", type=Path, default=Path("data/review/exit_plans.jsonl"))
     lifecycle.add_argument("--trade-plan-log", type=Path, default=Path("data/review/trade_plans.jsonl"))
@@ -693,6 +1301,12 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--limit", type=int, default=20)
     lifecycle.add_argument("--format", choices=["json", "markdown"], default="json")
     lifecycle.add_argument("--output", type=Path, help="Optional output path")
+    lifecycle.add_argument("--record", action="store_true", help="Persist the lifecycle snapshot to SQLite when --sqlite is set")
+    lifecycle.add_argument("--max-probe-pct", type=float, default=0.05)
+    lifecycle.add_argument("--max-position-pct", type=float, default=0.2)
+    lifecycle.add_argument("--add-step-pct", type=float, default=0.05)
+    lifecycle.add_argument("--add-profit-trigger-pct", type=float, default=0.03)
+    lifecycle.add_argument("--reduce-loss-warning-pct", type=float, default=0.03)
 
     plan = portfolio_sub.add_parser("plan", help="Build and optionally persist a trade plan")
     add_dataset_args(plan)
@@ -789,6 +1403,53 @@ def build_parser() -> argparse.ArgumentParser:
     experiments.add_argument("--output", type=Path, help="Optional JSON output path")
     experiments.add_argument("--report-output", type=Path, help="Optional Markdown report path")
     experiments.add_argument("--summary-output", type=Path, help="Optional structured summary JSON path")
+    calibration = optimize_sub.add_parser(
+        "structure-calibration",
+        help="Calibrate structure score, chase risk, candle warning, and false-breakout thresholds",
+    )
+    calibration.add_argument("--csv", type=Path, required=True, help="OHLCV CSV path")
+    calibration.add_argument("--cash", type=float, default=100000)
+    calibration.add_argument("--buy-price", choices=["close", "open"], default="open", help="Backtest execution price")
+    calibration.add_argument("--execution-timing", choices=["next_bar", "same_bar"], default="next_bar")
+    calibration.add_argument("--min-20d-return", type=float, default=0.12)
+    calibration.add_argument("--min-volume-ratio", type=float, default=1.5)
+    calibration.add_argument("--max-volume-ratio", type=float, default=6.0)
+    calibration.add_argument("--max-atr-pct", type=float, default=0.12)
+    calibration.add_argument("--min-ma20-slope", type=float, default=0.0)
+    calibration.add_argument("--max-close-ma20-gap", type=float, default=0.45)
+    calibration.add_argument("--max-rsi", type=float, default=90.0)
+    calibration.add_argument("--min-traded-value", type=float, default=0.0)
+    calibration.add_argument("--format", choices=["json", "markdown"], default="json")
+    calibration.add_argument("--output", type=Path, help="Optional output path")
+    reliability = optimize_sub.add_parser("backtest-reliability", help="Audit backtest credibility across strategies, periods, and regimes")
+    reliability.add_argument("--csv", type=Path, required=True, help="OHLCV CSV path")
+    reliability.add_argument("--strategy", action="append", default=[], help="Built-in strategy name, repeatable")
+    reliability.add_argument("--config", action="append", type=Path, default=[], help="Strategy YAML config, repeatable")
+    reliability.add_argument("--cash", type=float, default=100000)
+    reliability.add_argument("--buy-price", choices=["close", "open"], default="open", help="Backtest execution price")
+    reliability.add_argument("--execution-timing", choices=["next_bar", "same_bar"], default="next_bar")
+    reliability.add_argument("--train-ratio", type=float, default=0.7)
+    reliability.add_argument("--regime-lookback", type=int, default=20)
+    reliability.add_argument("--bull-threshold", type=float, default=0.05)
+    reliability.add_argument("--bear-threshold", type=float, default=-0.05)
+    reliability.add_argument("--min-rows-per-symbol", type=int, default=30)
+    reliability.add_argument("--max-stale-days", type=int)
+    reliability.add_argument("--as-of", help="Reference date for stale data checks, YYYY-MM-DD")
+    reliability.add_argument("--format", choices=["json", "markdown"], default="json")
+    reliability.add_argument("--output", type=Path, help="Optional output path")
+    portfolio_calibration = optimize_sub.add_parser("portfolio-calibration", help="Calibrate dynamic strategy portfolio budgets and caps")
+    portfolio_calibration.add_argument("--csv", type=Path, required=True, help="OHLCV CSV path")
+    portfolio_calibration.add_argument("--portfolio-config", type=Path, default=Path("configs/strategy_portfolio.yaml"), help="Strategy portfolio YAML config")
+    portfolio_calibration.add_argument("--cash", type=float, default=100000)
+    portfolio_calibration.add_argument("--buy-price", choices=["close", "open"], default="open", help="Backtest execution price")
+    portfolio_calibration.add_argument("--execution-timing", choices=["next_bar", "same_bar"], default="next_bar")
+    portfolio_calibration.add_argument("--rebalance-period", type=int, default=5)
+    portfolio_calibration.add_argument("--max-positions", type=int, default=5)
+    portfolio_calibration.add_argument("--min-history-days", type=int, default=30)
+    portfolio_calibration.add_argument("--train-ratio", type=float, default=0.7)
+    portfolio_calibration.add_argument("--preset", choices=["compact", "full"], default="compact")
+    portfolio_calibration.add_argument("--format", choices=["json", "markdown"], default="json")
+    portfolio_calibration.add_argument("--output", type=Path, help="Optional output path")
     export_strategy = optimize_sub.add_parser("export-strategy", help="Export strategy YAML from experiment summary")
     export_strategy.add_argument("--summary", type=Path, required=True, help="Experiment summary JSON")
     export_strategy.add_argument("--output", type=Path, required=True, help="Strategy YAML output path")
@@ -809,7 +1470,8 @@ def build_parser() -> argparse.ArgumentParser:
     promote_strategy.add_argument("--description", help="Optional strategy description override")
     promote_strategy.add_argument("--csv", type=Path, help="Optional OHLCV CSV for a smoke backtest")
     promote_strategy.add_argument("--backtest", action="store_true", help="Run one backtest after promotion")
-    promote_strategy.add_argument("--buy-price", choices=["close", "open"], default="close", help="Backtest buy price")
+    promote_strategy.add_argument("--buy-price", choices=["close", "open"], default="open", help="Backtest execution price")
+    promote_strategy.add_argument("--execution-timing", choices=["next_bar", "same_bar"], default="next_bar", help="Backtest signal execution timing")
     promote_strategy.add_argument("--cash", type=float, default=100000)
     promote_strategy.add_argument("--promotion-output", type=Path, help="Optional promotion result JSON")
     promote_strategy.add_argument("--promotion-log", type=Path, help="Optional promotion history JSONL")
@@ -853,13 +1515,39 @@ def add_discipline_record_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--discipline-log", type=Path, default=Path("data/review/discipline.jsonl"))
 
 
+def add_strategy_constraint_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--journal", type=Path, default=Path("data/review/trades.jsonl"))
+    parser.add_argument("--promotion-log", type=Path, default=Path("data/review/promotions.jsonl"), help="Strategy promotion JSONL")
+    parser.add_argument("--constraint-log", type=Path, default=Path("data/review/strategy_constraints.jsonl"))
+    add_approval_cooldown_workflow_args(parser)
+
+
+def add_trading_day_state_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--record-state", action="store_true", help="Persist trading-day phase state for review")
+    parser.add_argument("--state-log", type=Path, default=Path("data/review/trading_day_states.jsonl"))
+
+
+def add_approval_cooldown_workflow_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--approval-log", type=Path, default=Path("data/review/order_approvals.jsonl"))
+    parser.add_argument("--disable-approval-cooldown", action="store_true", help="Do not auto-derive cooldown constraints from approval audit")
+    parser.add_argument("--record-approval-cooldown", action="store_true", help="Persist auto-derived approval cooldown constraints")
+    parser.add_argument("--approval-lookahead-days", type=int, default=1)
+    parser.add_argument("--approval-value-tolerance-pct", type=float, default=0.02)
+    parser.add_argument("--approval-block-threshold", type=int, default=1)
+    parser.add_argument("--approval-warn-threshold", type=int, default=2)
+    parser.add_argument("--approval-fallback-threshold", type=int, default=2)
+    parser.add_argument("--approval-warn-exposure-multiplier", type=float, default=0.5)
+
+
 def add_dragon_gate_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--entry-gate",
         choices=["all", "pass-watch", "pass"],
         default="all",
-        help="浠?dragon_leader 浣跨敤锛氭寜杩涘満闂搁棬杩囨护淇″彿",
+        help="Filter dragon_leader entries by gate status.",
     )
+
+
 def add_dragon_entry_model_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dragon-entry-model",
@@ -943,7 +1631,10 @@ def source_from_args(args: argparse.Namespace, attr: str, default: str = "auto")
 def source_or_default(args: argparse.Namespace, explicit_source: str, attr: str, default: str = "auto") -> str:
     if explicit_source != "auto":
         return explicit_source
-    return source_from_args(args, attr, default)
+    resolved = source_from_args(args, attr, default)
+    if resolved.strip().lower() in {"csv", "cache", "local"}:
+        return default
+    return resolved
 
 def enrich_and_score_candidates(
     frame: pd.DataFrame,
@@ -965,27 +1656,132 @@ def enrich_and_score_candidates(
         return scored
     return score_candidates(scored, weights)
 
+
+def apply_strategy_gate_to_candidates(candidates: pd.DataFrame, strategy_health: dict | None) -> pd.DataFrame:
+    if candidates.empty or not strategy_health:
+        return candidates.copy()
+    gated = candidates.copy()
+    gated["strategy_alert_level"] = str(strategy_health.get("alert_level", "pass") or "pass")
+    gated["strategy_action"] = str(strategy_health.get("action", "keep") or "keep")
+    gated["strategy_policy_state"] = str(strategy_health.get("policy_state", "") or "")
+    gated["strategy_exposure_multiplier"] = _strategy_health_exposure_multiplier(strategy_health)
+    gated["strategy_actionable"] = _strategy_health_allows_new_positions(strategy_health)
+    gated["strategy_constraint_alerts"] = ",".join(str(item) for item in list(strategy_health.get("alerts") or []))
+    note = str(strategy_health.get("policy_note", "") or "")
+    if note:
+        gated["strategy_constraint_note"] = note
+    return gated
+
+
+def _strategy_health_allows_new_positions(strategy_health: dict | None) -> bool:
+    if not strategy_health:
+        return True
+    alert_level = str(strategy_health.get("alert_level", "pass") or "pass")
+    action = str(strategy_health.get("action", "keep") or "keep")
+    if alert_level == "block" or action == "pause":
+        return False
+    return _strategy_health_exposure_multiplier(strategy_health) > 0
+
+
+def _strategy_health_exposure_multiplier(strategy_health: dict | None) -> float:
+    if not strategy_health:
+        return 1.0
+    value = strategy_health.get("policy_exposure_multiplier")
+    if value in (None, ""):
+        alert_level = str(strategy_health.get("alert_level", "pass") or "pass")
+        action = str(strategy_health.get("action", "keep") or "keep")
+        if alert_level == "block" or action == "pause":
+            return 0.0
+        if alert_level == "warn" or action == "reduce":
+            return 0.5
+        return 1.0
+    return max(0.0, min(float(value), 1.0))
+
+
+def screened_candidates_from_args(
+    args: argparse.Namespace,
+    frame: pd.DataFrame,
+    *,
+    strategy=None,
+    settings: SystemSettings | None = None,
+    strategy_health: dict | None = None,
+    only_top_sectors: bool | None = None,
+    top: int | None = None,
+    sector_top: int | None = None,
+) -> pd.DataFrame:
+    settings = settings or settings_from_args(args)
+    if getattr(args, "portfolio_config", None):
+        portfolio_config = StrategyPortfolioConfig.from_yaml(args.portfolio_config)
+        health_by_strategy = {
+            str(item.get("strategy", "") or ""): item
+            for item in _strategy_health_from_args(args)
+            if str(item.get("strategy", "") or "")
+        }
+        plan = build_strategy_portfolio_plan(
+            frame,
+            portfolio_config,
+            strategy_health_by_name=health_by_strategy,
+        )
+        candidates = plan.candidates
+        candidates = enrich_and_score_candidates(
+            frame,
+            candidates,
+            settings.scoring.weights,
+            sector_column=getattr(args, "sector_column", None),
+            sector_top=sector_top if sector_top is not None else getattr(args, "sector_top", 5),
+            only_top_sectors=only_top_sectors if only_top_sectors is not None else getattr(args, "only_top_sectors", False),
+        )
+        candidates = apply_portfolio_score_adjustment(candidates)
+        candidate_limit = top if top is not None else getattr(args, "top", None)
+        if candidate_limit:
+            candidates = candidates.head(candidate_limit)
+        candidates.attrs["selection_strategy_name"] = portfolio_config.name
+        candidates.attrs["strategy_portfolio_plan"] = {
+            "name": plan.name,
+            "market_temperature": plan.market_temperature.to_dict(),
+            "sleeves": [item.to_dict() for item in plan.sleeves],
+        }
+        args._strategy_portfolio_plan = candidates.attrs["strategy_portfolio_plan"]
+        return candidates
+
+    strategy = strategy or strategy_from_args(args)
+    args._resolved_strategy = strategy
+    current_strategy_health = strategy_health if strategy_health is not None else _current_strategy_health(args)
+    candidates = strategy.screen(frame)
+    candidates = enrich_and_score_candidates(
+        frame,
+        candidates,
+        settings.scoring.weights,
+        sector_column=getattr(args, "sector_column", None),
+        sector_top=sector_top if sector_top is not None else getattr(args, "sector_top", 5),
+        only_top_sectors=only_top_sectors if only_top_sectors is not None else getattr(args, "only_top_sectors", False),
+    )
+    candidate_limit = top if top is not None else getattr(args, "top", None)
+    if candidate_limit:
+        candidates = candidates.head(candidate_limit)
+    return apply_strategy_gate_to_candidates(candidates, current_strategy_health)
+
+
 def run_screen(args: argparse.Namespace) -> None:
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     frame = limit_recent_history(frame, getattr(args, "lookback_days", None))
     frame = prefilter_dragon_universe(frame, args.strategy, getattr(args, "prefilter_symbols", None))
-    strategy = strategy_from_args(args)
-    args._resolved_strategy = strategy
+    strategy = None if getattr(args, "portfolio_config", None) else strategy_from_args(args)
+    if strategy is not None:
+        args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    results = strategy.screen(frame)
-    results = enrich_and_score_candidates(
+    current_strategy_health = {} if getattr(args, "portfolio_config", None) else _current_strategy_health(args)
+    results = screened_candidates_from_args(
+        args,
         frame,
-        results,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=current_strategy_health,
     )
-    if args.top:
-        results = results.head(args.top)
     rows = results.to_dict(orient="records")
-    if args.record:
-        SelectionTracker(args.tracker, sqlite_path=getattr(args, "sqlite", None)).record_many(records_from_selection(strategy.name, rows))
+    if args.record and _strategy_health_allows_new_positions(current_strategy_health):
+        strategy_name = str(results.attrs.get("selection_strategy_name") or getattr(strategy, "name", "") or args.strategy)
+        SelectionTracker(args.tracker, sqlite_path=getattr(args, "sqlite", None)).record_many(records_from_selection(strategy_name, rows))
     print(json.dumps(rows, ensure_ascii=False, indent=2, default=str))
 
 def run_dragon_screen(args: argparse.Namespace) -> None:
@@ -1002,7 +1798,13 @@ def run_dragon_check(args: argparse.Namespace) -> None:
 def run_backtest(args: argparse.Namespace) -> None:
     frame = read_ohlcv_csv(args.csv)
     strategy = strategy_from_args(args)
-    engine = BacktestEngine(BacktestConfig(initial_cash=args.cash, buy_price_field=args.buy_price))
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=args.cash,
+            buy_price_field=args.buy_price,
+            execution_timing=getattr(args, "execution_timing", "next_bar"),
+        )
+    )
     result = engine.run(frame, strategy)
     print(json.dumps(result.summary(), ensure_ascii=False, indent=2))
 
@@ -1018,21 +1820,18 @@ def run_daily_report(args: argparse.Namespace) -> None:
 
     if args.csv or (args.cache_dir and args.universe):
         frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
-        strategy = strategy_from_args(args)
-        args._resolved_strategy = strategy
+        strategy = None if getattr(args, "portfolio_config", None) else strategy_from_args(args)
+        if strategy is not None:
+            args._resolved_strategy = strategy
         settings = settings_from_args(args)
-        current_strategy_health = _current_strategy_health(args)
-        selected_frame = strategy.screen(frame)
-        selected_frame = enrich_and_score_candidates(
+        current_strategy_health = {} if getattr(args, "portfolio_config", None) else _current_strategy_health(args)
+        selected_frame = screened_candidates_from_args(
+            args,
             frame,
-            selected_frame,
-            settings.scoring.weights,
-            sector_column=args.sector_column,
-            sector_top=args.sector_top,
-            only_top_sectors=args.only_top_sectors,
+            strategy=strategy,
+            settings=settings,
+            strategy_health=current_strategy_health,
         )
-        if args.top:
-            selected_frame = selected_frame.head(args.top)
         selected = selected_frame.to_dict(orient="records")
         market_temperature = calculate_market_temperature(frame, selected_frame).to_dict()
         allocation_plan = build_allocation_plan(
@@ -1045,7 +1844,9 @@ def run_daily_report(args: argparse.Namespace) -> None:
             strategy_health=current_strategy_health,
         ).to_dict()
         data_health = check_ohlcv_health(frame, min_rows_per_symbol=30, max_stale_days=10).to_dict()
-        SelectionTracker(args.tracker, sqlite_path=getattr(args, "sqlite", None)).record_many(records_from_selection(strategy.name, selected))
+        if _strategy_health_allows_new_positions(current_strategy_health):
+            strategy_name = str(selected_frame.attrs.get("selection_strategy_name") or getattr(strategy, "name", "") or args.strategy)
+            SelectionTracker(args.tracker, sqlite_path=getattr(args, "sqlite", None)).record_many(records_from_selection(strategy_name, selected))
         market_view = f"Screening completed with {strategy.name}, {len(selected)} candidates selected."
         risks.append("This report currently uses technical data only and does not merge limit-up/down, suspensions, news, or sector strength.")
     else:
@@ -1134,11 +1935,15 @@ def run_weekly_report(args: argparse.Namespace) -> None:
         strategy = strategy_from_args(args)
         args._resolved_strategy = strategy
         settings = settings_from_args(args)
-        candidates = strategy.screen(frame)
-        if not candidates.empty:
-            from quant_system.screening.scoring import score_candidates
-
-            candidates = score_candidates(candidates, settings.scoring.weights)
+        candidates = screened_candidates_from_args(
+            args,
+            frame,
+            strategy=strategy,
+            settings=settings,
+            strategy_health=_current_strategy_health(args),
+            only_top_sectors=False,
+            top=None,
+        )
         market_temperature = calculate_market_temperature(frame, candidates).to_dict()
         horizons = tuple(int(item.strip()) for item in args.horizons.split(",") if item.strip())
         if getattr(args, "sqlite", None):
@@ -1169,6 +1974,7 @@ def run_weekly_report(args: argparse.Namespace) -> None:
     promotion_summary = summarize_promotion_records(_promotion_records_from_args(args), limit=10)
     strategy_health = _strategy_health_from_args(args)
     constraint_summary = _constraint_summary_from_args(args, limit=10)
+    approval_cooldown = _approval_cooldown_payload_from_args(args)
     strategy_rotation = build_strategy_rotation(strategy_health, constraint_summary, promotion_summary)
     rotation_history = _rotation_history_from_args(args, limit=20)
     content = WeeklyReport().render(
@@ -1226,19 +2032,20 @@ def run_dragon_validation_report(args: argparse.Namespace) -> None:
         min_next_open_gap=args.min_next_open_gap,
         require_next_open_above_ma5=not args.allow_next_open_below_ma5,
     )
-    current_candidates = strategy.screen(frame)
-    current_candidates = enrich_and_score_candidates(
+    args._resolved_strategy = strategy
+    current_candidates = screened_candidates_from_args(
+        args,
         frame,
-        current_candidates,
-        settings_from_args(args).scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings_from_args(args),
+        strategy_health=_current_strategy_health(args),
     )
-    if args.top:
-        current_candidates = current_candidates.head(args.top)
     backtest_result = BacktestEngine(
-        BacktestConfig(initial_cash=args.cash, buy_price_field=args.buy_price)
+        BacktestConfig(
+            initial_cash=args.cash,
+            buy_price_field=args.buy_price,
+            execution_timing=getattr(args, "execution_timing", "next_bar"),
+        )
     ).run(frame, strategy)
     content = DragonValidationReport().render(
         DragonValidationInput(
@@ -1302,17 +2109,15 @@ def run_briefing_report(args: argparse.Namespace) -> None:
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
     current_strategy_health = _current_strategy_health(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.top,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=current_strategy_health,
         only_top_sectors=False,
+        sector_top=args.top,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
 
     market_temperature = calculate_market_temperature(frame, candidates).to_dict()
     allocation_plan = build_allocation_plan(
@@ -1451,9 +2256,8 @@ def run_briefing_report(args: argparse.Namespace) -> None:
     print(str(args.output))
 
 
-def run_premarket_report(args: argparse.Namespace, *, print_path: bool = True, context: dict | None = None) -> None:
-    context = context or _premarket_context_from_args(args)
-    content = PremarketReport().render(
+def _render_premarket_report_from_context(context: dict) -> str:
+    return PremarketReport().render(
         PremarketReportInput(
             title="A-share Premarket Report",
             market_temperature=context["market_temperature"],
@@ -1470,6 +2274,7 @@ def run_premarket_report(args: argparse.Namespace, *, print_path: bool = True, c
             strategy_health=context["strategy_health"],
             constraint_summary=context["constraint_summary"],
             strategy_rotation=context["strategy_rotation"],
+            strategy_portfolio=context.get("strategy_portfolio"),
             rotation_history=context["rotation_history"],
             gate_review=context.get("gate_review"),
             trade_stats=context.get("trade_stats"),
@@ -1479,8 +2284,14 @@ def run_premarket_report(args: argparse.Namespace, *, print_path: bool = True, c
             lifecycle_snapshot=context.get("lifecycle_snapshot"),
             discipline_summary=context.get("discipline_summary"),
             discipline_adherence=context.get("discipline_adherence"),
+            final_battle_plan=context.get("final_battle_plan"),
         )
     )
+
+
+def run_premarket_report(args: argparse.Namespace, *, print_path: bool = True, context: dict | None = None) -> None:
+    context = context or _premarket_context_from_args(args)
+    content = _render_premarket_report_from_context(context)
     if getattr(args, "command", "") != "workflow":
         _persist_discipline_from_args(
             args,
@@ -1496,6 +2307,156 @@ def run_premarket_report(args: argparse.Namespace, *, print_path: bool = True, c
         print(str(args.output))
 
 
+def run_battle_plan_report(args: argparse.Namespace) -> None:
+    context = _premarket_context_from_args(args)
+    plan = context.get("final_battle_plan") or build_final_battle_plan(context)
+    if getattr(args, "format", "markdown") == "json":
+        text = json.dumps(plan, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = render_final_battle_plan_markdown(plan)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_cockpit_report(args: argparse.Namespace) -> None:
+    context = _premarket_context_from_args(args)
+    trade_records = _trade_records_from_args(args)
+    trade_plan_records = _trade_plan_records_from_args(args)
+    confirm_records = _execution_confirmation_records_from_args(args)
+    execution_audit = summarize_execution_audit(
+        confirm_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        limit=getattr(args, "top", 5),
+    )
+    trade_plan_audit = summarize_trade_plan_audit(trade_plan_records, trade_records, limit=getattr(args, "top", 5))
+    gate_review = summarize_gate_journal(trade_records, limit=getattr(args, "top", 5))
+    cockpit = build_trading_cockpit(
+        context,
+        execution_audit=execution_audit,
+        trade_plan_audit=trade_plan_audit,
+        gate_review=gate_review,
+        execution_confirmations=confirm_records,
+        approval_cooldown=context.get("approval_cooldown"),
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    if getattr(args, "format", "markdown") == "json":
+        text = json.dumps(cockpit, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = render_trading_cockpit_markdown(cockpit)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_timeline_report(args: argparse.Namespace) -> None:
+    context = _premarket_context_from_args(args)
+    settings = settings_from_args(args)
+    trade_records = _trade_records_from_args(args)
+    confirm_records = _execution_confirmation_records_from_args(args)
+    execution_audit = summarize_execution_audit(
+        confirm_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        limit=getattr(args, "top", 5),
+    )
+    timeline = build_trading_day_timeline(
+        now=_timeline_now_from_args(args),
+        final_battle_plan=context.get("final_battle_plan"),
+        execution_confirmations=confirm_records,
+        trade_records=trade_records,
+        execution_audit=execution_audit,
+        lifecycle_snapshot=context.get("lifecycle_snapshot"),
+        gate_review=context.get("gate_review"),
+        approval_cooldown=context.get("approval_cooldown"),
+    )
+    timeline = apply_trading_day_template(timeline, settings.trading_day.phases)
+    _persist_trading_day_state_from_args(args, "report.timeline", timeline)
+    if getattr(args, "format", "markdown") == "json":
+        text = json.dumps(timeline, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = render_trading_day_timeline_markdown(timeline)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_assistant_report(args: argparse.Namespace) -> None:
+    context = _premarket_context_from_args(args)
+    settings = settings_from_args(args)
+    trade_records = _trade_records_from_args(args)
+    trade_plan_records = _trade_plan_records_from_args(args)
+    confirm_records = _execution_confirmation_records_from_args(args)
+    execution_audit = summarize_execution_audit(
+        confirm_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        limit=getattr(args, "top", 5),
+    )
+    trade_plan_audit = summarize_trade_plan_audit(trade_plan_records, trade_records, limit=getattr(args, "top", 5))
+    gate_review = summarize_gate_journal(trade_records, limit=getattr(args, "top", 5))
+    cockpit = build_trading_cockpit(
+        context,
+        execution_audit=execution_audit,
+        trade_plan_audit=trade_plan_audit,
+        gate_review=gate_review,
+        execution_confirmations=confirm_records,
+        approval_cooldown=context.get("approval_cooldown"),
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    battle_plan = context.get("final_battle_plan") or build_final_battle_plan(context)
+    timeline = build_trading_day_timeline(
+        now=_timeline_now_from_args(args),
+        final_battle_plan=battle_plan,
+        execution_confirmations=confirm_records,
+        trade_records=trade_records,
+        execution_audit=execution_audit,
+        lifecycle_snapshot=context.get("lifecycle_snapshot"),
+        gate_review=gate_review,
+        approval_cooldown=context.get("approval_cooldown"),
+    )
+    timeline = apply_trading_day_template(timeline, settings.trading_day.phases)
+    state = _persist_trading_day_state_from_args(args, "report.assistant", timeline)
+    watchdog = _trading_day_watchdog_from_args(args, state)
+    assistant = build_trading_assistant(
+        context={**context, "final_battle_plan": battle_plan},
+        cockpit=cockpit,
+        timeline=timeline,
+        watchdog=watchdog,
+        state=state,
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    if getattr(args, "format", "markdown") == "json":
+        text = json.dumps(assistant, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = render_trading_assistant_markdown(assistant)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def _timeline_now_from_args(args: argparse.Namespace) -> datetime | None:
+    value = str(getattr(args, "as_of", "") or "").strip()
+    if not value:
+        return None
+    if len(value) == 10:
+        value = f"{value}T15:30:00"
+    return datetime.fromisoformat(value)
+
+
 def _premarket_context_from_args(
     args: argparse.Namespace,
     *,
@@ -1503,22 +2464,21 @@ def _premarket_context_from_args(
     data_health: dict | None = None,
 ) -> dict:
     frame = frame if frame is not None else load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
-    strategy = strategy_from_args(args)
-    args._resolved_strategy = strategy
+    factor_frame = add_core_factors(frame)
+    strategy = None if getattr(args, "portfolio_config", None) else strategy_from_args(args)
+    if strategy is not None:
+        args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    current_strategy_health = _current_strategy_health(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
-        frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
+    current_strategy_health = {} if getattr(args, "portfolio_config", None) else _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
+        factor_frame,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=current_strategy_health,
         only_top_sectors=False,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
-    market_temperature = calculate_market_temperature(frame, candidates).to_dict()
+    market_temperature = calculate_market_temperature(factor_frame, candidates).to_dict()
     max_positions = int(getattr(args, "max_positions", None) or getattr(args, "top", 5) or 5)
     allocation_plan = build_allocation_plan(
         candidates,
@@ -1576,6 +2536,16 @@ def _premarket_context_from_args(
     strategy_rotation = build_strategy_rotation(strategy_health, constraint_summary, promotion_summary)
     rotation_history = _rotation_history_from_args(args, limit=20)
     trade_stats = summarize_trade_journal(trade_records)
+    lifecycle_rule_plan = build_lifecycle_rule_plan(
+        position_book_model,
+        stops=stops,
+        discipline_summary=trade_stats,
+        max_probe_pct=getattr(args, "max_probe_pct", 0.05),
+        max_position_pct=getattr(args, "max_position_pct", 0.2),
+        add_step_pct=getattr(args, "add_step_pct", 0.05),
+        add_profit_trigger_pct=getattr(args, "add_profit_trigger_pct", 0.03),
+        reduce_loss_warning_pct=getattr(args, "reduce_loss_warning_pct", 0.03),
+    ).to_dict()
     gate_review = summarize_gate_journal(trade_records, limit=5)
     action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=5)
     exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=5)
@@ -1585,6 +2555,7 @@ def _premarket_context_from_args(
         lot_book=lot_book,
         holding_action_plan=holding_action_plan,
         exit_plan=exit_plan,
+        lifecycle_rule_plan=lifecycle_rule_plan,
         trade_plan_audit=summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=5),
         action_execution_summary=action_execution_summary,
         exit_execution_summary=exit_execution_summary,
@@ -1601,7 +2572,8 @@ def _premarket_context_from_args(
         cash=args.cash,
         max_positions=max_positions,
     )
-    return {
+    approval_cooldown = _approval_cooldown_payload_from_args(args)
+    context = {
         "market_temperature": market_temperature,
         "market_context": market_context,
         "data_health": data_health,
@@ -1613,9 +2585,12 @@ def _premarket_context_from_args(
         "holding_risk": holding_risk,
         "holding_action_plan": holding_action_plan,
         "exit_plan": exit_plan,
+        "lifecycle_rule_plan": lifecycle_rule_plan,
         "strategy_health": strategy_health,
         "constraint_summary": constraint_summary,
+        "approval_cooldown": approval_cooldown,
         "strategy_rotation": strategy_rotation,
+        "strategy_portfolio": candidates.attrs.get("strategy_portfolio_plan", {}),
         "rotation_history": rotation_history,
         "gate_review": gate_review,
         "trade_stats": trade_stats,
@@ -1626,6 +2601,8 @@ def _premarket_context_from_args(
         "discipline_summary": discipline_summary,
         "discipline_adherence": discipline_adherence,
     }
+    context["final_battle_plan"] = build_final_battle_plan(context, limit=max_positions)
+    return context
 
 
 def run_workflow_premarket(args: argparse.Namespace) -> None:
@@ -1666,7 +2643,7 @@ def run_workflow_premarket(args: argparse.Namespace) -> None:
 
     try:
         frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe, strict=args.strict)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         summary["status"] = "fail"
         summary["steps"].append({"name": "load_data", "status": "fail", "message": str(exc)})
         _finish_workflow_summary(args, summary)
@@ -1694,9 +2671,27 @@ def run_workflow_premarket(args: argparse.Namespace) -> None:
     if repair_plan.get("status") == "action_needed" and summary["status"] == "ok":
         summary["status"] = "warn"
 
+    approval_cooldown = _record_auto_approval_cooldown_from_args(args)
+    summary["approval_cooldown"] = {
+        "status": approval_cooldown.get("status", "pass"),
+        "constraint_count": int(approval_cooldown.get("constraint_count", 0) or 0),
+        "persisted_count": int(approval_cooldown.get("persisted_count", 0) or 0),
+        "skipped_existing_count": int(approval_cooldown.get("skipped_existing_count", 0) or 0),
+    }
+    summary["steps"].append({"name": "approval_cooldown", "status": approval_cooldown.get("status", "pass"), "summary": approval_cooldown})
+    summary["status"] = _merge_workflow_status(summary["status"], str(approval_cooldown.get("status", "pass") or "pass"))
+
     context = _premarket_context_from_args(args, frame=frame, data_health=health)
     gate = _workflow_execution_gate(health, repair_plan, context)
+    battle_plan = context.get("final_battle_plan") or build_final_battle_plan(context)
     summary["gate"] = gate
+    summary["battle_plan"] = {
+        "status": battle_plan.get("status", ""),
+        "decision": battle_plan.get("decision", ""),
+        "must_do_count": len(list(battle_plan.get("must_do") or [])),
+        "buy_candidate_count": len(list(battle_plan.get("buy_candidates") or [])),
+        "blocked_candidate_count": len(list(battle_plan.get("blocked_candidates") or [])),
+    }
     summary["steps"].append({"name": "execution_gate", "status": gate["status"], "summary": gate})
     if gate["status"] == "block":
         summary["status"] = "block" if summary["status"] != "fail" else "fail"
@@ -1705,6 +2700,12 @@ def run_workflow_premarket(args: argparse.Namespace) -> None:
 
     run_premarket_report(args, print_path=False, context=context)
     summary["steps"].append({"name": "premarket_report", "status": "ok", "path": str(args.output)})
+    battle_plan_output = getattr(args, "battle_plan_output", None)
+    if battle_plan_output:
+        battle_plan_output.parent.mkdir(parents=True, exist_ok=True)
+        battle_plan_output.write_text(render_final_battle_plan_markdown(battle_plan) + "\n", encoding="utf-8")
+        summary["outputs"]["battle_plan"] = str(battle_plan_output)
+        summary["steps"].append({"name": "battle_plan", "status": "ok", "path": str(battle_plan_output)})
     if getattr(args, "record_actions", False):
         append_position_action_plan_record(args.action_log, context.get("holding_action_plan") or {})
         summary["steps"].append({"name": "holding_action_plan", "status": "ok", "path": str(args.action_log)})
@@ -1724,6 +2725,343 @@ def run_workflow_premarket(args: argparse.Namespace) -> None:
     _finish_workflow_summary(args, summary)
 
 
+def run_workflow_trading_day(args: argparse.Namespace) -> None:
+    summary = {
+        "status": "ok",
+        "steps": [],
+        "outputs": {
+            "premarket_report": str(args.premarket_output),
+            "battle_plan": str(args.battle_plan_output),
+            "cockpit": str(args.cockpit_output),
+            "execution_audit": str(args.execution_audit_output),
+            "lifecycle": str(args.lifecycle_output),
+            "timeline": str(args.timeline_output),
+            "assistant": str(args.assistant_output),
+            "daily_brief": str(args.daily_output),
+            "trade_plan_batch": str(args.trade_plan_batch_output),
+            "review_doctor": str(args.review_doctor_output),
+            "review_attribution": str(args.review_attribution_output),
+            "attribution_policy": str(args.attribution_policy_output),
+            "summary": str(args.summary_output),
+        },
+    }
+    try:
+        frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe, strict=args.strict)
+    except (FileNotFoundError, ValueError) as exc:
+        summary["status"] = "fail"
+        summary["steps"].append({"name": "load_data", "status": "fail", "message": str(exc)})
+        _finish_workflow_summary(args, summary)
+        raise SystemExit(1)
+
+    health = check_ohlcv_health(
+        frame,
+        min_rows_per_symbol=args.min_rows,
+        max_stale_days=args.max_stale_days,
+        as_of=args.as_of,
+    ).to_dict()
+    summary["steps"].append({"name": "data_health", "status": health.get("status", ""), "summary": health})
+    if health.get("status") == "fail":
+        summary["status"] = "fail"
+    elif health.get("status") == "warn":
+        summary["status"] = "warn"
+
+    repair_plan = build_ohlcv_repair_plan(
+        frame,
+        min_rows_per_symbol=args.min_rows,
+        max_stale_days=args.max_stale_days,
+        as_of=args.as_of,
+    )
+    summary["steps"].append({"name": "repair_plan", "status": repair_plan.get("status", ""), "summary": repair_plan})
+    if repair_plan.get("status") == "action_needed" and summary["status"] == "ok":
+        summary["status"] = "warn"
+
+    approval_cooldown = _record_auto_approval_cooldown_from_args(args)
+    summary["approval_cooldown"] = {
+        "status": approval_cooldown.get("status", "pass"),
+        "constraint_count": int(approval_cooldown.get("constraint_count", 0) or 0),
+        "persisted_count": int(approval_cooldown.get("persisted_count", 0) or 0),
+        "skipped_existing_count": int(approval_cooldown.get("skipped_existing_count", 0) or 0),
+    }
+    summary["steps"].append({"name": "approval_cooldown", "status": approval_cooldown.get("status", "pass"), "summary": approval_cooldown})
+    summary["status"] = _merge_workflow_status(summary["status"], str(approval_cooldown.get("status", "pass") or "pass"))
+
+    context = _premarket_context_from_args(args, frame=frame, data_health=health)
+    settings = settings_from_args(args)
+    battle_plan = context.get("final_battle_plan") or build_final_battle_plan(context)
+    workflow_gate = _workflow_execution_gate(health, repair_plan, context)
+    current_strategy_health = {}
+    if not getattr(args, "portfolio_config", None):
+        for item in list(context.get("strategy_health") or []):
+            if str(item.get("strategy", "") or "") == str(getattr(args, "strategy", "") or ""):
+                current_strategy_health = item
+                break
+    max_positions = max(int(getattr(args, "max_positions", None) or getattr(args, "top", 5) or 5), 1)
+    trade_plan_batch = build_trade_plan_batch(
+        candidates=pd.DataFrame(context.get("candidates") or []),
+        market_temperature=context.get("market_temperature") or {},
+        cash=args.cash,
+        max_positions=max_positions,
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=current_strategy_health,
+        trade_date=str(getattr(args, "as_of", "") or "")[:10] or None,
+    )
+    trade_plan_persistence = {"persisted_count": 0, "skipped_existing_count": 0}
+    if getattr(args, "record_trade_plans", False):
+        trade_plan_persistence = append_unique_trade_plan_records(
+            args.trade_plan_log,
+            trade_plan_batch.plans,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+
+    trade_records = _trade_records_from_args(args)
+    trade_plan_records = _trade_plan_records_from_args(args)
+    confirm_records = _execution_confirmation_records_from_args(args)
+    execution_audit = summarize_execution_audit(
+        confirm_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    trade_plan_audit = summarize_trade_plan_audit(
+        trade_plan_records,
+        trade_records,
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    gate_review = summarize_gate_journal(trade_records, limit=max(int(getattr(args, "top", 5) or 5), 1))
+    cockpit = build_trading_cockpit(
+        context,
+        execution_audit=execution_audit,
+        trade_plan_audit=trade_plan_audit,
+        gate_review=gate_review,
+        execution_confirmations=confirm_records,
+        approval_cooldown=context.get("approval_cooldown"),
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    timeline = build_trading_day_timeline(
+        now=_timeline_now_from_args(args),
+        final_battle_plan=battle_plan,
+        execution_confirmations=confirm_records,
+        trade_records=trade_records,
+        execution_audit=execution_audit,
+        lifecycle_snapshot=context.get("lifecycle_snapshot"),
+        gate_review=gate_review,
+        approval_cooldown=context.get("approval_cooldown"),
+    )
+    timeline = apply_trading_day_template(timeline, settings.trading_day.phases)
+    lifecycle_snapshot = context.get("lifecycle_snapshot") or {}
+    state = _persist_trading_day_state_from_args(args, "workflow.trading-day", timeline)
+    watchdog = _trading_day_watchdog_from_args(args, state)
+    state_records = list(_trading_day_state_records_from_args(args))
+    current_state_fingerprint = _record_fingerprint(state)
+    if all(_record_fingerprint(record) != current_state_fingerprint for record in state_records):
+        state_records.append(state)
+    review_doctor = _review_doctor_from_args(
+        args,
+        lifecycle_snapshots=_merge_lifecycle_snapshots(_lifecycle_snapshot_records_from_args(args), lifecycle_snapshot),
+        trading_day_states=state_records,
+    )
+    assistant = build_trading_assistant(
+        context={**context, "final_battle_plan": battle_plan},
+        cockpit=cockpit,
+        timeline=timeline,
+        watchdog=watchdog,
+        state=state,
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    review_attribution = build_review_attribution_report(
+        trade_plan_audit=trade_plan_audit,
+        execution_audit=execution_audit,
+        approval_audit=dict(approval_cooldown.get("approval_audit") or {}),
+        approval_cooldown=approval_cooldown,
+        gate_review=gate_review,
+        trade_stats=context.get("trade_stats") or summarize_trade_journal(trade_records),
+        lifecycle_snapshot=lifecycle_snapshot,
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    attribution_policy = build_attribution_policy(
+        review_attribution,
+        default_strategy=getattr(args, "strategy", "") or "manual_order",
+        effective_date=getattr(args, "attribution_policy_date", ""),
+    )
+    attribution_policy_persistence = {}
+    if getattr(args, "record_attribution_policy", False):
+        attribution_policy_persistence = _persist_attribution_policy(args, attribution_policy)
+
+    summary["gate"] = workflow_gate
+    summary["battle_plan"] = {
+        "status": battle_plan.get("status", ""),
+        "decision": battle_plan.get("decision", ""),
+        "must_do_count": len(list(battle_plan.get("must_do") or [])),
+        "buy_candidate_count": len(list(battle_plan.get("buy_candidates") or [])),
+        "blocked_candidate_count": len(list(battle_plan.get("blocked_candidates") or [])),
+    }
+    summary["trade_plan_batch"] = {
+        "status": trade_plan_batch.status,
+        "gate_status": trade_plan_batch.gate_status,
+        "candidate_count": trade_plan_batch.total_candidates,
+        "plan_count": trade_plan_batch.total_plans,
+        **trade_plan_persistence,
+    }
+    summary["review_doctor"] = {
+        "status": review_doctor.get("status", "pass"),
+        "issue_count": len(list(review_doctor.get("issues") or [])),
+        "counts": review_doctor.get("counts", {}),
+    }
+    summary["execution_audit"] = {
+        "status": "block" if int(execution_audit.get("block_count", 0) or 0) > 0 else ("warn" if int(execution_audit.get("warn_count", 0) or 0) > 0 else "pass"),
+        "missing_trade_writeback_count": int(execution_audit.get("missing_trade_writeback_count", 0) or 0),
+        "missing_confirmation_trade_count": int(execution_audit.get("missing_confirmation_trade_count", 0) or 0),
+        "fallback_link_count": int(execution_audit.get("fallback_link_count", 0) or 0),
+    }
+    summary["cockpit"] = {
+        "status": cockpit.get("status", ""),
+        "decision": cockpit.get("decision", ""),
+        "action_item_count": len(list(cockpit.get("action_items") or [])),
+    }
+    summary["timeline"] = {
+        "status": timeline.get("status", ""),
+        "action_item_count": len(list(timeline.get("action_items") or [])),
+    }
+    summary["assistant"] = {
+        "status": assistant.get("status", ""),
+        "urgent_action_count": len(list(assistant.get("urgent_actions") or [])),
+    }
+    summary["review_attribution"] = {
+        "status": review_attribution.get("status", "pass"),
+        "score": int(review_attribution.get("score", 100) or 0),
+        "root_cause_count": int(review_attribution.get("root_cause_count", 0) or 0),
+        "by_area": review_attribution.get("by_area", {}),
+    }
+    summary["attribution_policy"] = {
+        "status": attribution_policy.get("status", "pass"),
+        "constraint_count": int(attribution_policy.get("constraint_count", 0) or 0),
+        **attribution_policy_persistence,
+    }
+    daily_brief = build_daily_trade_brief(
+        workflow_summary=summary,
+        battle_plan=battle_plan,
+        cockpit=cockpit,
+        assistant=assistant,
+        trade_plan_batch=trade_plan_batch,
+        review_doctor=review_doctor,
+        review_attribution=review_attribution,
+        attribution_policy=attribution_policy,
+        outputs=summary["outputs"],
+        limit=max(int(getattr(args, "top", 5) or 5), 1),
+    )
+    summary["daily_brief"] = {
+        "status": daily_brief.get("status", ""),
+        "can_open_new_position": bool(daily_brief.get("can_open_new_position")),
+        "allowed_order_count": int((daily_brief.get("counts") or {}).get("allowed_orders", 0) or 0),
+        "blocked_order_count": int((daily_brief.get("counts") or {}).get("blocked_orders", 0) or 0),
+        "must_handle_count": int((daily_brief.get("counts") or {}).get("must_handle", 0) or 0),
+    }
+    summary["steps"].append({"name": "workflow_gate", "status": workflow_gate["status"], "summary": workflow_gate})
+    summary["steps"].append({"name": "trade_plan_batch", "status": trade_plan_batch.status, "summary": trade_plan_batch.to_dict()})
+    summary["steps"].append({"name": "review_doctor", "status": review_doctor.get("status", "pass"), "summary": review_doctor})
+    summary["steps"].append({"name": "execution_audit", "status": summary["execution_audit"]["status"], "summary": execution_audit})
+    summary["steps"].append({"name": "review_attribution", "status": review_attribution.get("status", "pass"), "summary": review_attribution})
+    summary["steps"].append({"name": "attribution_policy", "status": attribution_policy.get("status", "pass"), "summary": attribution_policy})
+    summary["steps"].append({"name": "cockpit_gate", "status": cockpit.get("status", ""), "summary": cockpit})
+    summary["status"] = _merge_workflow_status(
+        summary["status"],
+        workflow_gate.get("status", "pass"),
+        trade_plan_batch.status,
+        review_doctor.get("status", "pass"),
+        cockpit.get("status", "pass"),
+        timeline.get("status", "pass"),
+        assistant.get("status", "pass"),
+        summary["execution_audit"]["status"],
+        review_attribution.get("status", "pass"),
+        attribution_policy.get("status", "pass"),
+        daily_brief.get("status", "pass"),
+    )
+
+    args.premarket_output.parent.mkdir(parents=True, exist_ok=True)
+    args.premarket_output.write_text(_render_premarket_report_from_context(context) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "premarket_report", "status": "ok", "path": str(args.premarket_output)})
+
+    args.battle_plan_output.parent.mkdir(parents=True, exist_ok=True)
+    args.battle_plan_output.write_text(render_final_battle_plan_markdown(battle_plan) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "battle_plan_report", "status": "ok", "path": str(args.battle_plan_output)})
+
+    args.cockpit_output.parent.mkdir(parents=True, exist_ok=True)
+    args.cockpit_output.write_text(render_trading_cockpit_markdown(cockpit) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "cockpit_report", "status": "ok", "path": str(args.cockpit_output)})
+
+    args.execution_audit_output.parent.mkdir(parents=True, exist_ok=True)
+    args.execution_audit_output.write_text(render_execution_audit_markdown(execution_audit) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "execution_audit_report", "status": "ok", "path": str(args.execution_audit_output)})
+
+    args.lifecycle_output.parent.mkdir(parents=True, exist_ok=True)
+    args.lifecycle_output.write_text(render_position_lifecycle_markdown(lifecycle_snapshot) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "lifecycle_report", "status": "ok", "path": str(args.lifecycle_output)})
+
+    args.review_attribution_output.parent.mkdir(parents=True, exist_ok=True)
+    args.review_attribution_output.write_text(render_review_attribution_markdown(review_attribution) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "review_attribution_report", "status": "ok", "path": str(args.review_attribution_output)})
+
+    args.attribution_policy_output.parent.mkdir(parents=True, exist_ok=True)
+    args.attribution_policy_output.write_text(render_attribution_policy_markdown(attribution_policy) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "attribution_policy_report", "status": "ok", "path": str(args.attribution_policy_output)})
+
+    args.timeline_output.parent.mkdir(parents=True, exist_ok=True)
+    args.timeline_output.write_text(render_trading_day_timeline_markdown(timeline) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "timeline_report", "status": "ok", "path": str(args.timeline_output)})
+    if getattr(args, "record_state", False):
+        summary["state"] = {
+            "status": state.get("status", ""),
+            "phase_count": state.get("phase_count", 0),
+            "action_item_count": state.get("action_item_count", 0),
+        }
+        summary["steps"].append({"name": "trading_day_state", "status": "ok", "path": str(getattr(args, "state_log", ""))})
+
+    args.assistant_output.parent.mkdir(parents=True, exist_ok=True)
+    args.assistant_output.write_text(render_trading_assistant_markdown(assistant) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "assistant_report", "status": "ok", "path": str(args.assistant_output)})
+
+    args.daily_output.parent.mkdir(parents=True, exist_ok=True)
+    args.daily_output.write_text(render_daily_trade_brief_markdown(daily_brief) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "daily_brief_report", "status": "ok", "path": str(args.daily_output)})
+
+    args.trade_plan_batch_output.parent.mkdir(parents=True, exist_ok=True)
+    args.trade_plan_batch_output.write_text(render_trade_plan_batch_markdown(trade_plan_batch) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "trade_plan_batch_report", "status": "ok", "path": str(args.trade_plan_batch_output)})
+
+    args.review_doctor_output.parent.mkdir(parents=True, exist_ok=True)
+    args.review_doctor_output.write_text(render_review_doctor_markdown(review_doctor) + "\n", encoding="utf-8")
+    summary["steps"].append({"name": "review_doctor_report", "status": "ok", "path": str(args.review_doctor_output)})
+
+    if getattr(args, "record_actions", False):
+        append_position_action_plan_record(args.action_log, context.get("holding_action_plan") or {})
+        summary["steps"].append({"name": "holding_action_plan", "status": "ok", "path": str(args.action_log)})
+    if getattr(args, "record_exit_plan", False):
+        append_exit_plan_record(args.exit_log, context.get("exit_plan") or {})
+        summary["steps"].append({"name": "exit_plan", "status": "ok", "path": str(args.exit_log)})
+    if getattr(args, "record_discipline", False):
+        _persist_discipline_from_args(
+            args,
+            "workflow.trading-day",
+            gate_review=gate_review,
+            trade_stats=context.get("trade_stats"),
+            holding_risk=context.get("holding_risk"),
+            allocation_plan=context.get("allocation_plan"),
+        )
+        summary["steps"].append({"name": "discipline_record", "status": "ok", "path": str(getattr(args, "discipline_log", ""))})
+
+    _finish_workflow_summary(args, summary)
+
+
+def _merge_workflow_status(current: str, *states: str) -> str:
+    order = {"ok": 0, "pass": 0, "warn": 1, "block": 2, "fail": 3}
+    result = current if current in order else "ok"
+    for state in states:
+        if order.get(state, 0) > order.get(result, 0):
+            result = "fail" if state == "fail" else state
+    return result
+
+
 def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> dict:
     reasons: list[str] = []
     status = "pass"
@@ -1735,53 +3073,64 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
     exit_plan = context.get("exit_plan") or {}
     exit_plan_status = str(exit_plan.get("status", "pass") or "pass")
     regime = str((context.get("market_temperature") or {}).get("regime", "") or "")
+    battle_plan = context.get("final_battle_plan") or {}
+    battle_plan_status = str(battle_plan.get("status", "") or "")
+    battle_plan_reasons = list(battle_plan.get("reasons", []) or [])
 
     if health.get("status") == "fail":
         status = "block"
-        reasons.append("数据健康检查失败")
+        reasons.append("Data health failed; do not continue the trading workflow.")
     if "block" in pretrade_statuses:
         status = "block"
-        reasons.append("交易前预检存在阻断项")
+        reasons.append("At least one pretrade check is blocking execution.")
     if holding_status == "block":
         status = "block"
-        reasons.append("持仓风险存在阻断项")
+        reasons.append("Holding risk is blocking new execution.")
     if holding_action_status == "block":
         status = "block"
-        reasons.append("持仓动作计划存在阻断项")
+        reasons.append("Holding action plan contains blocking tasks.")
     if exit_plan_status == "block":
         status = "block"
         reasons.append("Exit plan contains blocking sell tasks.")
     if regime in {"frozen", "empty"}:
         status = "block"
-        reasons.append(f"市场状态为 {regime}")
+        reasons.append(f"Market regime blocks execution: {regime}")
+    if battle_plan_status == "block":
+        status = "block"
+        reasons.append("Final battle plan blocks new execution.")
+        reasons.extend(f"battle_plan: {item}" for item in battle_plan_reasons[:3])
 
     if status != "block":
         if health.get("status") == "warn":
             status = "warn"
-            reasons.append("数据健康存在预警")
+            reasons.append("Data health has warning items.")
         if repair_plan.get("status") == "action_needed":
             status = "warn"
-            reasons.append("缓存/历史数据需要修复")
+            reasons.append("Data repair plan needs action before relying on the workflow.")
         if "warn" in pretrade_statuses:
             status = "warn"
-            reasons.append("交易前预检存在预警项")
+            reasons.append("At least one pretrade check is warning.")
         if holding_status == "warn":
             status = "warn"
-            reasons.append("持仓风险存在预警项")
+            reasons.append("Holding risk has warning items.")
         if holding_action_status == "warn":
             status = "warn"
-            reasons.append("持仓动作计划存在预警项")
+            reasons.append("Holding action plan has warning tasks.")
         if exit_plan_status == "warn":
             status = "warn"
             reasons.append("Exit plan has warning-level sell tasks.")
         if regime == "cold":
             status = "warn"
-            reasons.append("市场温度偏冷")
+            reasons.append("Market regime is cold; reduce aggressiveness.")
+        if battle_plan_status == "warn":
+            status = "warn"
+            reasons.append("Final battle plan is in warning mode.")
+            reasons.extend(f"battle_plan: {item}" for item in battle_plan_reasons[:3])
 
     message = {
-        "pass": "可进入计划交易，但正式买入前仍需重跑单票 precheck。",
-        "warn": "只允许计划内确认单，禁止追高加仓；先处理预警项。",
-        "block": "禁止新开仓，先处理阻断项。",
+        "pass": "Workflow gate passed; trading tasks can proceed with normal manual checks.",
+        "warn": "Workflow gate is warning; proceed only with reduced size and explicit review.",
+        "block": "Workflow gate is blocking; 禁止新开仓 until blocking evidence is cleared.",
     }[status]
     return {
         "status": status,
@@ -1795,6 +3144,7 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
         "holding_status": holding_status,
         "holding_action_status": holding_action_status,
         "exit_plan_status": exit_plan_status,
+        "battle_plan_status": battle_plan_status,
         "holding_actions": {
             "exit_count": int(holding_action_plan.get("exit_count", 0) or 0),
             "reduce_count": int(holding_action_plan.get("reduce_count", 0) or 0),
@@ -1808,7 +3158,6 @@ def _workflow_execution_gate(health: dict, repair_plan: dict, context: dict) -> 
         },
         "market_regime": regime,
     }
-
 
 def _finish_workflow_summary(args: argparse.Namespace, summary: dict) -> None:
     text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
@@ -1938,7 +3287,7 @@ def _cache_needs_refresh(cached: pd.DataFrame, end: str, refresh_stale_days: int
 def run_data_health(args: argparse.Namespace) -> None:
     try:
         frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe, strict=args.strict)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(
             json.dumps(
                 {
@@ -1966,7 +3315,7 @@ def run_data_health(args: argparse.Namespace) -> None:
 def run_data_repair_plan(args: argparse.Namespace) -> None:
     try:
         frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe, strict=args.strict)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(
             json.dumps(
                 {
@@ -1994,7 +3343,7 @@ def run_data_repair_plan(args: argparse.Namespace) -> None:
 def run_data_repair_execute(args: argparse.Namespace) -> None:
     try:
         frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe, strict=args.strict)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(
             json.dumps(
                 {
@@ -2100,6 +3449,407 @@ def run_data_db_import_daily(args: argparse.Namespace) -> None:
     store.log_fetch_job(args.symbol, args.start, args.end, result.provider, "ok", rows=rows)
     print(json.dumps({"status": "ok", "db_path": str(args.db_path), "provider": result.provider, "rows": rows}, ensure_ascii=False, indent=2))
 
+
+def run_data_db_import_batch_daily(args: argparse.Namespace) -> None:
+    store = SQLiteStore(args.db_path)
+    store.init()
+    stocks = _stocks_for_db_batch(args, store)
+    if args.limit:
+        stocks = stocks[: args.limit]
+    source = source_or_default(args, args.source, "daily_source", "auto")
+    skipped = []
+    if not getattr(args, "refresh", False):
+        coverage = store.daily_coverage()
+        requested_start = pd.to_datetime(args.start).strftime("%Y-%m-%d")
+        requested_end = pd.to_datetime(args.end).strftime("%Y-%m-%d")
+        pending = []
+        for stock in stocks:
+            symbol = str(stock["symbol"]).zfill(6)
+            item = coverage.get(symbol)
+            if item and _coverage_satisfies_request(item, requested_start, requested_end):
+                skipped.append(symbol)
+            else:
+                pending.append(stock)
+        stocks = pending
+    workers = max(1, int(args.workers or 1))
+    progress_every = max(0, int(args.progress_every or 0))
+    summary = {
+        "status": "ok",
+        "db_path": str(args.db_path),
+        "start": args.start,
+        "end": args.end,
+        "adjust": args.adjust,
+        "source": source,
+        "symbols": len(stocks),
+        "skipped": len(skipped),
+        "ok": 0,
+        "failed": 0,
+        "rows": 0,
+        "by_provider": {},
+        "failures": [],
+    }
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {
+            pool.submit(_fetch_daily_without_health, str(stock["symbol"]), args.start, args.end, args.adjust, source): stock
+            for stock in stocks
+        }
+        for done, future in enumerate(as_completed(future_map), start=1):
+            stock = future_map[future]
+            symbol = str(stock["symbol"]).zfill(6)
+            try:
+                result = future.result()
+                rows = store.upsert_daily_bars(result.frame, source=result.provider, adjust=args.adjust)
+                store.log_fetch_job(symbol, args.start, args.end, result.provider, "ok", rows=rows)
+                summary["ok"] += 1
+                summary["rows"] += rows
+                summary["by_provider"][result.provider] = summary["by_provider"].get(result.provider, 0) + 1
+            except Exception as exc:  # noqa: BLE001 - keep the rest of the batch moving.
+                summary["status"] = "partial_failed"
+                summary["failed"] += 1
+                error = str(exc)
+                store.log_fetch_job(symbol, args.start, args.end, source, "failed", rows=0, error=error)
+                if len(summary["failures"]) < 50:
+                    summary["failures"].append({"symbol": symbol, "name": str(stock.get("name", "")), "error": error})
+            if progress_every and (done == 1 or done % progress_every == 0 or done == len(stocks)):
+                print(
+                    json.dumps(
+                        {
+                            "event": "db_import_batch_daily_progress",
+                            "done": done,
+                            "total": len(stocks),
+                            "ok": summary["ok"],
+                            "failed": summary["failed"],
+                            "rows": summary["rows"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+
+
+def run_data_db_import_adjustment(args: argparse.Namespace) -> None:
+    store = SQLiteStore(args.db_path)
+    store.init()
+    provider = AkShareAdjustmentFactorProvider()
+    symbol = str(args.symbol).zfill(6)
+    frame = provider.fetch_adjustment_factors(symbol, args.start, args.end, adjust=args.adjust)
+    rows = store.upsert_adjustment_factors(frame, source=f"{provider.name}:{args.adjust}")
+    print(json.dumps({"status": "ok", "db_path": str(args.db_path), "symbol": symbol, "rows": rows, "provider": provider.name}, ensure_ascii=False, indent=2, default=str))
+
+
+def run_data_db_import_batch_adjustment(args: argparse.Namespace) -> None:
+    store = SQLiteStore(args.db_path)
+    store.init()
+    stocks = _stocks_for_db_batch(args, store)
+    if args.limit:
+        stocks = stocks[: args.limit]
+    if not getattr(args, "refresh", False):
+        existing = _existing_adjustment_symbols(store)
+        stocks = [stock for stock in stocks if str(stock["symbol"]).zfill(6) not in existing]
+    provider = AkShareAdjustmentFactorProvider()
+    workers = max(1, int(args.workers or 1))
+    progress_every = max(0, int(args.progress_every or 0))
+    summary = {
+        "status": "ok",
+        "db_path": str(args.db_path),
+        "start": args.start,
+        "end": args.end,
+        "adjust": args.adjust,
+        "symbols": len(stocks),
+        "ok": 0,
+        "empty": 0,
+        "failed": 0,
+        "rows": 0,
+        "failures": [],
+    }
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {
+            pool.submit(provider.fetch_adjustment_factors, str(stock["symbol"]), args.start, args.end, args.adjust): stock
+            for stock in stocks
+        }
+        for done, future in enumerate(as_completed(future_map), start=1):
+            stock = future_map[future]
+            symbol = str(stock["symbol"]).zfill(6)
+            try:
+                frame = future.result()
+                rows = store.upsert_adjustment_factors(frame, source=f"{provider.name}:{args.adjust}")
+                if rows:
+                    summary["ok"] += 1
+                    summary["rows"] += rows
+                else:
+                    summary["empty"] += 1
+            except Exception as exc:  # noqa: BLE001 - keep the rest of the batch moving.
+                summary["status"] = "partial_failed"
+                summary["failed"] += 1
+                if len(summary["failures"]) < 50:
+                    summary["failures"].append({"symbol": symbol, "name": str(stock.get("name", "")), "error": str(exc)})
+            if progress_every and (done == 1 or done % progress_every == 0 or done == len(stocks)):
+                print(
+                    json.dumps(
+                        {
+                            "event": "db_import_batch_adjustment_progress",
+                            "done": done,
+                            "total": len(stocks),
+                            "ok": summary["ok"],
+                            "empty": summary["empty"],
+                            "failed": summary["failed"],
+                            "rows": summary["rows"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+
+
+def run_data_db_import_minute(args: argparse.Namespace) -> None:
+    store = SQLiteStore(args.db_path)
+    store.init()
+    symbol = str(args.symbol).zfill(6)
+    source = getattr(args, "source", "auto")
+    errors: list[str] = []
+    try:
+        provider_name = ""
+        frame = pd.DataFrame()
+        for provider in minute_provider_chain(source):
+            try:
+                frame = provider.fetch_minute(symbol, args.start, args.end, period=args.period, adjust=args.adjust)
+                provider_name = provider.name
+                break
+            except Exception as exc:  # noqa: BLE001 - try the next minute source.
+                errors.append(f"{provider.name}: {exc}")
+        if frame.empty:
+            raise RuntimeError("All minute providers failed: " + " | ".join(errors))
+        path_without_suffix = _minute_cache_path(args.cache_dir, symbol, args.period, args.adjust, args.start, args.end)
+        write_result = write_frame_cache(frame, path_without_suffix)
+        record = {
+            "symbol": symbol,
+            "period": args.period,
+            "start": args.start,
+            "end": args.end,
+            "adjust": args.adjust,
+            "path": str(write_result.path),
+            "rows": len(frame),
+            "source": provider_name,
+            "status": "ok",
+            "error": "",
+        }
+        store.upsert_minute_bar_catalog(record)
+        print(json.dumps({"status": "ok", "db_path": str(args.db_path), **record}, ensure_ascii=False, indent=2, default=str))
+    except Exception as exc:  # noqa: BLE001 - catalog failed attempts for diagnosis.
+        record = {
+            "symbol": symbol,
+            "period": args.period,
+            "start": args.start,
+            "end": args.end,
+            "adjust": args.adjust,
+            "path": "",
+            "rows": 0,
+            "source": source,
+            "status": "failed",
+            "error": str(exc),
+        }
+        store.upsert_minute_bar_catalog(record)
+        print(json.dumps({"status": "failed", "db_path": str(args.db_path), **record}, ensure_ascii=False, indent=2, default=str))
+
+
+def run_data_db_import_batch_minute(args: argparse.Namespace) -> None:
+    store = SQLiteStore(args.db_path)
+    store.init()
+    stocks = _stocks_for_db_batch(args, store)
+    if args.limit:
+        stocks = stocks[: args.limit]
+    if not getattr(args, "refresh", False):
+        existing = _existing_minute_catalog_keys(store)
+        stocks = [
+            stock for stock in stocks
+            if (str(stock["symbol"]).zfill(6), str(args.period), str(args.start), str(args.end), str(args.adjust)) not in existing
+        ]
+    providers = minute_provider_chain(getattr(args, "source", "auto"))
+    workers = max(1, int(args.workers or 1))
+    progress_every = max(0, int(args.progress_every or 0))
+    summary = {
+        "status": "ok",
+        "db_path": str(args.db_path),
+        "start": args.start,
+        "end": args.end,
+        "period": args.period,
+        "adjust": args.adjust,
+        "symbols": len(stocks),
+        "ok": 0,
+        "failed": 0,
+        "rows": 0,
+        "failures": [],
+    }
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {
+            pool.submit(_fetch_and_cache_minute_chunk, providers, args.cache_dir, str(stock["symbol"]), args.start, args.end, args.period, args.adjust): stock
+            for stock in stocks
+        }
+        for done, future in enumerate(as_completed(future_map), start=1):
+            stock = future_map[future]
+            symbol = str(stock["symbol"]).zfill(6)
+            try:
+                record = future.result()
+                store.upsert_minute_bar_catalog(record)
+                summary["ok"] += 1
+                summary["rows"] += int(record.get("rows", 0) or 0)
+            except Exception as exc:  # noqa: BLE001 - keep the rest of the batch moving.
+                summary["status"] = "partial_failed"
+                summary["failed"] += 1
+                record = {
+                    "symbol": symbol,
+                    "period": args.period,
+                    "start": args.start,
+                    "end": args.end,
+                    "adjust": args.adjust,
+                    "path": "",
+                    "rows": 0,
+                    "source": getattr(args, "source", "auto"),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                store.upsert_minute_bar_catalog(record)
+                if len(summary["failures"]) < 50:
+                    summary["failures"].append({"symbol": symbol, "name": str(stock.get("name", "")), "error": str(exc)})
+            if progress_every and (done == 1 or done % progress_every == 0 or done == len(stocks)):
+                print(
+                    json.dumps(
+                        {
+                            "event": "db_import_batch_minute_progress",
+                            "done": done,
+                            "total": len(stocks),
+                            "ok": summary["ok"],
+                            "failed": summary["failed"],
+                            "rows": summary["rows"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+
+
+def run_data_db_import_review(args: argparse.Namespace) -> None:
+    store = SQLiteStore(args.db_path)
+    store.init()
+    summary = {
+        "status": "ok",
+        "db_path": str(args.db_path),
+        "items": [],
+    }
+    sources = [
+        ("selections", getattr(args, "tracker", None), read_jsonl, store.insert_selections),
+        ("trades", getattr(args, "journal", None), read_jsonl, store.insert_trade),
+        ("promotions", getattr(args, "promotion_log", None), read_jsonl, store.insert_strategy_promotion),
+        ("constraints", getattr(args, "constraint_log", None), read_jsonl, store.insert_strategy_constraint),
+        ("discipline", getattr(args, "discipline_log", None), read_jsonl, store.insert_discipline_record),
+        ("trade_plans", getattr(args, "trade_plan_log", None), read_jsonl, store.insert_trade_plan),
+        ("execution_confirmations", getattr(args, "confirm_log", None), read_jsonl, store.insert_execution_confirmation),
+        ("action_plans", getattr(args, "action_log", None), read_jsonl, store.insert_position_action_plan),
+        ("exit_plans", getattr(args, "exit_log", None), read_jsonl, store.insert_exit_plan),
+        ("lifecycle_snapshots", getattr(args, "lifecycle_log", None), read_jsonl, store.insert_lifecycle_snapshot),
+        ("trading_day_states", getattr(args, "state_log", None), read_jsonl, store.insert_trading_day_state),
+        ("order_approvals", getattr(args, "approval_log", None), read_jsonl, store.insert_order_approval),
+    ]
+    for name, path, reader, writer in sources:
+        if not path or not path.exists():
+            summary["items"].append({"name": name, "status": "missing"})
+            continue
+        records = reader(path)
+        if not records:
+            summary["items"].append({"name": name, "status": "empty", "path": str(path)})
+            continue
+        existing = _existing_fingerprints_for_review_source(store, name)
+        imported = 0
+        skipped = 0
+        if name == "selections":
+            payloads = _dedupe_review_records(records, existing)
+            imported = len(payloads)
+            skipped = len(records) - imported
+            if payloads:
+                writer(payloads)
+        elif name == "trades":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "promotions":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "constraints":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "discipline":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "trade_plans":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "execution_confirmations":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "action_plans":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "exit_plans":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "lifecycle_snapshots":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record, snapshot_date=str(record.get("snapshot_date", "")))
+                imported += 1
+        elif name == "trading_day_states":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        elif name == "order_approvals":
+            for record in records:
+                if _record_fingerprint(record) in existing:
+                    skipped += 1
+                    continue
+                writer(record)
+                imported += 1
+        summary["items"].append({"name": name, "status": "ok", "imported": imported, "skipped": skipped, "path": str(path)})
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+
 def run_data_db_screen(args: argparse.Namespace) -> None:
     store = SQLiteStore(args.db_path)
     universe = store.read_universe()
@@ -2112,17 +3862,13 @@ def run_data_db_screen(args: argparse.Namespace) -> None:
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=_current_strategy_health(args),
     )
-    if args.top:
-        candidates = candidates.head(args.top)
     print(json.dumps(candidates.to_dict(orient="records"), ensure_ascii=False, indent=2, default=str))
 
 def run_data_db_health(args: argparse.Namespace) -> None:
@@ -2134,8 +3880,155 @@ def run_data_db_health(args: argparse.Namespace) -> None:
     report = check_ohlcv_health(frame, min_rows_per_symbol=args.min_rows, max_stale_days=args.max_stale_days, as_of=args.as_of)
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
 
+
+def run_data_db_doctor(args: argparse.Namespace) -> None:
+    summary = build_review_doctor_report(
+        selections=_sqlite_selection_records(args.db_path),
+        trades=_sqlite_trade_records(args.db_path),
+        trade_plans=_sqlite_trade_plan_records(args.db_path),
+        execution_confirmations=_sqlite_execution_confirmation_records(args.db_path),
+        action_plans=_sqlite_position_action_records(args.db_path),
+        exit_plans=_sqlite_exit_plan_records(args.db_path),
+        lifecycle_snapshots=_sqlite_lifecycle_snapshot_records(args.db_path),
+        trading_day_states=_sqlite_trading_day_state_records(args.db_path),
+    )
+    text = render_review_doctor_markdown(summary) if getattr(args, "format", "json") == "markdown" else json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
 def run_data_db_catalog(args: argparse.Namespace) -> None:
-    raise NotImplementedError("data db catalog is not implemented")
+    store = SQLiteStore(args.db_path)
+    catalog = store.market_catalog()
+    catalog["db_path"] = str(args.db_path)
+    if getattr(args, "format", "json") == "markdown":
+        lines = [
+            "# Market Data Catalog",
+            "",
+            f"- DB: `{args.db_path}`",
+            f"- Universe: {catalog['universe']['rows']} symbols",
+            f"- Daily bars: {catalog['daily_bars']['rows']} rows / {catalog['daily_bars']['symbols']} symbols / {catalog['daily_bars']['start']} to {catalog['daily_bars']['end']}",
+            f"- Adjustment factors: {catalog['adjustment_factors']['rows']} rows / {catalog['adjustment_factors']['symbols']} symbols",
+            f"- Minute catalog: {catalog['minute_bars']['catalog_jobs']} jobs / {catalog['minute_bars']['rows']} rows / {catalog['minute_bars']['symbols']} symbols",
+            f"- Fetch jobs: {catalog['fetch_jobs']['total']} total / {catalog['fetch_jobs']['ok']} ok / {catalog['fetch_jobs']['failed']} failed",
+        ]
+        print("\n".join(lines))
+        return
+    print(json.dumps(catalog, ensure_ascii=False, indent=2, default=str))
+
+
+def _stocks_for_db_batch(args: argparse.Namespace, store: SQLiteStore) -> list[dict[str, Any]]:
+    if getattr(args, "universe", None):
+        return [stock.__dict__ for stock in read_universe(args.universe)]
+    universe = store.read_universe()
+    if universe.empty:
+        raw = fetch_akshare_universe_with_retry()
+        universe = filter_universe(
+            raw,
+            UniverseBuildOptions(include_st=args.include_st, include_bj=args.include_bj),
+        )
+        store.upsert_universe(universe)
+    return universe.to_dict(orient="records")
+
+
+def _fetch_daily_without_health(symbol: str, start: str, end: str, adjust: str, source: str) -> ProviderResult:
+    errors: list[str] = []
+    for provider in provider_chain(source):
+        try:
+            frame = provider.fetch_daily(symbol=symbol, start=start, end=end, adjust=adjust)
+            if not frame.empty:
+                return ProviderResult(provider=provider.name, frame=frame)
+            errors.append(f"{provider.name}: empty result")
+        except Exception as exc:  # noqa: BLE001 - try the next configured source.
+            errors.append(f"{provider.name}: {exc}")
+    raise RuntimeError("All data providers failed: " + " | ".join(errors))
+
+
+def _coverage_satisfies_request(item: dict[str, Any], requested_start: str, requested_end: str) -> bool:
+    if not item.get("start") or not item.get("end"):
+        return False
+    start_gap = (pd.to_datetime(item["start"]) - pd.to_datetime(requested_start)).days
+    end_gap = (pd.to_datetime(requested_end) - pd.to_datetime(item["end"])).days
+    start_ok = item["start"] <= requested_start or 0 <= start_gap <= 10
+    end_ok = item["end"] >= requested_end or 0 <= end_gap <= 10
+    if start_ok and end_ok:
+        return True
+    if not end_ok or start_gap <= 10:
+        return False
+    rows = int(item.get("rows", 0) or 0)
+    observed_days = max(1, (pd.to_datetime(item["end"]) - pd.to_datetime(item["start"])).days + 1)
+    observed_density = rows / observed_days
+    return bool(rows >= 30 and observed_density >= 0.35)
+
+
+def _minute_cache_path(cache_dir: Path, symbol: str, period: str, adjust: str, start: str, end: str) -> Path:
+    start_label = pd.to_datetime(start).strftime("%Y%m%d%H%M%S")
+    end_label = pd.to_datetime(end).strftime("%Y%m%d%H%M%S")
+    adjust_label = adjust or "raw"
+    return cache_dir / f"period={period}" / f"adjust={adjust_label}" / str(symbol).zfill(6) / f"{start_label}_{end_label}"
+
+
+def _existing_adjustment_symbols(store: SQLiteStore) -> set[str]:
+    with store.connect() as conn:
+        rows = conn.execute("SELECT DISTINCT symbol FROM adjustment_factors").fetchall()
+    return {str(row["symbol"]).zfill(6) for row in rows}
+
+
+def _existing_minute_catalog_keys(store: SQLiteStore) -> set[tuple[str, str, str, str, str]]:
+    with store.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, period, start, end, adjust
+            FROM minute_bar_catalog
+            WHERE status = 'ok'
+            """
+        ).fetchall()
+    return {
+        (str(row["symbol"]).zfill(6), str(row["period"]), str(row["start"]), str(row["end"]), str(row["adjust"]))
+        for row in rows
+    }
+
+
+def _fetch_and_cache_minute_chunk(
+    providers: list[Any],
+    cache_dir: Path,
+    symbol: str,
+    start: str,
+    end: str,
+    period: str,
+    adjust: str,
+) -> dict[str, Any]:
+    normalized_symbol = str(symbol).zfill(6)
+    errors: list[str] = []
+    provider_name = ""
+    frame = pd.DataFrame()
+    for provider in providers:
+        try:
+            frame = provider.fetch_minute(normalized_symbol, start, end, period=period, adjust=adjust)
+            provider_name = provider.name
+            break
+        except Exception as exc:  # noqa: BLE001 - try the next minute source.
+            errors.append(f"{provider.name}: {exc}")
+    if frame.empty:
+        raise RuntimeError("All minute providers failed: " + " | ".join(errors))
+    path_without_suffix = _minute_cache_path(cache_dir, normalized_symbol, period, adjust, start, end)
+    write_result = write_frame_cache(frame, path_without_suffix)
+    record = {
+        "symbol": normalized_symbol,
+        "period": period,
+        "start": start,
+        "end": end,
+        "adjust": adjust,
+        "path": str(write_result.path),
+        "rows": len(frame),
+        "source": provider_name,
+        "status": "ok",
+        "error": "",
+    }
+    return record
 
 def run_data_universe(args: argparse.Namespace) -> None:
     try:
@@ -2229,14 +4122,48 @@ def run_review_trade_add(args: argparse.Namespace) -> None:
     tags = [item.strip() for item in args.tags.split(",") if item.strip()]
     gate = _gate_context_from_trade_args(args)
     trade_plan = _trade_plan_from_args(args)
+    execution_confirm = _execution_confirmation_from_args(args)
+    order_approval = _order_approval_from_args(args)
+    exception_reason = str((trade_plan or {}).get("exception_reason", getattr(args, "exception_reason", "")) or "").strip()
+    forced_exception_reasons = _forced_trade_exception_reasons(
+        side=args.side,
+        quantity=args.quantity,
+        price=args.price,
+        gate=gate,
+        trade_plan=trade_plan,
+        execution_confirm=execution_confirm,
+        order_approval=order_approval,
+    )
+    discipline_exception = bool(
+        (trade_plan or {}).get("discipline_exception", getattr(args, "discipline_exception", False))
+        or forced_exception_reasons
+    )
     if trade_plan:
         tags.extend(_trade_plan_tags(trade_plan))
+    if execution_confirm:
+        tags.extend(_execution_confirm_tags(execution_confirm))
+    if order_approval:
+        tags.extend(_order_approval_tags(order_approval))
     if gate.get("status") in {"warn", "block"}:
         tag = f"gate-{gate['status']}"
         if tag not in tags:
             tags.append(tag)
-    if getattr(args, "discipline_exception", False) and "discipline-exception" not in tags:
+    if discipline_exception and "discipline-exception" not in tags:
         tags.append("discipline-exception")
+    if discipline_exception and not exception_reason and "exception-missing-reason" not in tags:
+        tags.append("exception-missing-reason")
+    if execution_confirm and str(execution_confirm.get("status", "") or "") == "block" and "confirm-violated" not in tags:
+        tags.append("confirm-violated")
+    if order_approval and str(order_approval.get("status", "") or "") == "block" and "approval-violated" not in tags:
+        tags.append("approval-violated")
+    if forced_exception_reasons:
+        tags.extend(reason for reason in forced_exception_reasons if reason not in tags)
+    tags = _dedupe_text(tags)
+    actual_pct = args.actual_pct
+    if order_approval and not actual_pct:
+        actual_pct = float(order_approval.get("confirmed_pct", 0) or 0)
+    elif execution_confirm and not actual_pct:
+        actual_pct = float(execution_confirm.get("confirmed_pct", 0) or 0)
     entry = TradeJournalEntry(
         date=args.date,
         symbol=str(args.symbol).zfill(6),
@@ -2244,26 +4171,95 @@ def run_review_trade_add(args: argparse.Namespace) -> None:
         price=args.price,
         quantity=args.quantity,
         reason=args.reason,
-        name=args.name,
-        strategy=args.strategy,
+        name=args.name or _trade_plan_text(trade_plan, "name") or _execution_confirm_name(execution_confirm),
+        strategy=args.strategy or _trade_plan_text(trade_plan, "strategy"),
         market_regime=args.market_regime,
-        planned_pct=_trade_plan_number(trade_plan, "planned_pct", args.planned_pct),
-        actual_pct=args.actual_pct,
-        planned_price=_trade_plan_number(trade_plan, "entry_price", args.planned_price),
-        stop_price=_trade_plan_number(trade_plan, "stop_price", args.stop_price),
-        target_price=_trade_plan_number(trade_plan, "target_price", args.target_price),
+        planned_pct=_execution_confirm_number(execution_confirm, "confirmed_pct", _trade_plan_number(trade_plan, "planned_pct", args.planned_pct)),
+        actual_pct=actual_pct,
+        planned_price=_execution_confirm_number(execution_confirm, "current_price", _trade_plan_number(trade_plan, "entry_price", args.planned_price)),
+        stop_price=_execution_confirm_nested_number(execution_confirm, "pretrade_result", "stop_price", _trade_plan_number(trade_plan, "stop_price", args.stop_price)),
+        target_price=_execution_confirm_nested_number(execution_confirm, "pretrade_result", "target_price", _trade_plan_number(trade_plan, "target_price", args.target_price)),
         tags=tags,
         mistake_type=args.mistake_type,
         review=args.review,
-        gate_status=str((trade_plan or {}).get("gate_status", gate.get("status", ""))),
-        gate_message=str((trade_plan or {}).get("gate_reason", gate.get("message", ""))),
-        gate_reasons=list(gate.get("reasons", []) or []),
+        gate_status=str((trade_plan or {}).get("gate_status", gate.get("status", _execution_confirm_text(execution_confirm, "final_gate_status")))),
+        gate_message=str((trade_plan or {}).get("gate_reason", gate.get("message", _execution_confirm_text(execution_confirm, "decision")))),
+        gate_reasons=_dedupe_text(list(gate.get("reasons", []) or _execution_confirm_reasons(execution_confirm)) + forced_exception_reasons),
         workflow_summary=str(getattr(args, "workflow_summary", "") or ""),
-        discipline_exception=bool((trade_plan or {}).get("discipline_exception", getattr(args, "discipline_exception", False))),
-        exception_reason=str((trade_plan or {}).get("exception_reason", getattr(args, "exception_reason", "")) or ""),
+        discipline_exception=discipline_exception,
+        exception_reason=exception_reason,
+        execution_confirmation_path=str(getattr(args, "execution_confirm", "") or ""),
+        execution_confirmation_created_at=_execution_confirm_text(execution_confirm, "created_at"),
+        execution_confirmation_status=_execution_confirm_text(execution_confirm, "status"),
+        execution_confirmation_decision=_execution_confirm_text(execution_confirm, "decision"),
+        confirmation_price=_execution_confirm_optional_number(execution_confirm, "current_price"),
+        confirmation_reference_price=_execution_confirm_optional_number(execution_confirm, "reference_price"),
+        confirmed_pct=_execution_confirm_number(execution_confirm, "confirmed_pct", 0.0),
+        confirmed_value=_execution_confirm_number(execution_confirm, "confirmed_value", 0.0),
+        suggested_quantity=int(_execution_confirm_number(execution_confirm, "suggested_quantity", 0) or 0),
+        confirmation_price_deviation_pct=_trade_vs_confirm_price_gap(execution_confirm, args.price),
+        order_approval_path=str(getattr(args, "order_approval", "") or ""),
+        order_approval_created_at=_order_approval_text(order_approval, "created_at"),
+        order_approval_status=_order_approval_text(order_approval, "status"),
+        order_approval_decision=_order_approval_text(order_approval, "decision"),
+        approved_pct=_order_approval_number(order_approval, "confirmed_pct", 0.0),
+        approved_value=_order_approval_number(order_approval, "confirmed_value", 0.0),
+        approved_quantity=int(_order_approval_number(order_approval, "suggested_quantity", 0) or 0),
     )
     TradeJournal(args.journal, sqlite_path=getattr(args, "sqlite", None)).add(entry)
     print(json.dumps(entry.to_record(), ensure_ascii=False, indent=2))
+
+
+def _forced_trade_exception_reasons(
+    *,
+    side: str,
+    quantity: int,
+    price: float,
+    gate: dict,
+    trade_plan: dict | None,
+    execution_confirm: dict | None,
+    order_approval: dict | None,
+) -> list[str]:
+    if str(side or "").upper() != "BUY":
+        return []
+    reasons: list[str] = []
+    gate_status = str((trade_plan or {}).get("gate_status", gate.get("status", "")) or "")
+    if gate_status in {"warn", "block"}:
+        reasons.append(f"forced-gate-{gate_status}")
+
+    confirm_status = str((execution_confirm or {}).get("status", "") or "")
+    if confirm_status == "block":
+        reasons.append("forced-confirm-block")
+    confirm_quantity = int((execution_confirm or {}).get("suggested_quantity", 0) or 0)
+    if execution_confirm and confirm_quantity <= 0 and int(quantity or 0) > 0:
+        reasons.append("forced-confirm-no-quantity")
+    if confirm_quantity > 0 and int(quantity or 0) > confirm_quantity:
+        reasons.append("forced-confirm-size-exceeded")
+    confirm_price = _execution_confirm_optional_number(execution_confirm, "current_price")
+    if confirm_price not in (None, 0) and float(price) / float(confirm_price) - 1.0 > 0.005:
+        reasons.append("forced-confirm-price-chase")
+
+    approval_status = str((order_approval or {}).get("status", "") or "")
+    if approval_status == "block":
+        reasons.append("forced-approval-block")
+    approved_quantity = int((order_approval or {}).get("suggested_quantity", 0) or 0)
+    if order_approval and approved_quantity <= 0 and int(quantity or 0) > 0:
+        reasons.append("forced-approval-no-quantity")
+    if approved_quantity > 0 and int(quantity or 0) > approved_quantity:
+        reasons.append("forced-approval-size-exceeded")
+    return _dedupe_text(reasons)
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _gate_context_from_trade_args(args: argparse.Namespace) -> dict:
@@ -2354,8 +4350,162 @@ def run_review_trade_audit(args: argparse.Namespace) -> None:
     print(text)
 
 
+def run_review_execution_audit(args: argparse.Namespace) -> None:
+    summary = summarize_execution_audit(
+        _execution_confirmation_records_from_args(args),
+        _trade_records_from_args(args),
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        limit=getattr(args, "limit", 20),
+    )
+    if getattr(args, "format", "json") == "markdown":
+        text = render_execution_audit_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_approval_audit(args: argparse.Namespace) -> None:
+    summary = summarize_approval_execution(
+        _order_approval_records_from_args(args),
+        _trade_records_from_args(args),
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        value_tolerance_pct=getattr(args, "value_tolerance_pct", 0.02),
+        limit=getattr(args, "limit", 20),
+    )
+    if getattr(args, "format", "json") == "markdown":
+        text = render_approval_execution_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_approval_cooldown(args: argparse.Namespace) -> None:
+    audit_summary = summarize_approval_execution(
+        _order_approval_records_from_args(args),
+        _trade_records_from_args(args),
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        value_tolerance_pct=getattr(args, "value_tolerance_pct", 0.02),
+        limit=getattr(args, "limit", 20),
+    )
+    constraints = build_approval_cooldown_constraints(
+        audit_summary,
+        block_threshold=getattr(args, "block_threshold", 1),
+        warn_threshold=getattr(args, "warn_threshold", 2),
+        fallback_threshold=getattr(args, "fallback_threshold", 2),
+        warn_exposure_multiplier=getattr(args, "warn_exposure_multiplier", 0.5),
+    )
+    if getattr(args, "record", False):
+        for record in constraints:
+            persist_constraint_audit(
+                record,
+                log_path=getattr(args, "constraint_log", None),
+                sqlite_path=getattr(args, "sqlite", None),
+            )
+    payload = summarize_approval_cooldown(constraints)
+    payload["approval_audit"] = audit_summary
+    if getattr(args, "format", "json") == "markdown":
+        text = render_approval_cooldown_markdown(payload)
+    else:
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_attribution(args: argparse.Namespace) -> None:
+    summary = _review_attribution_report_from_args(args)
+    if getattr(args, "format", "json") == "markdown":
+        text = render_review_attribution_markdown(summary)
+    else:
+        text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_attribution_policy(args: argparse.Namespace) -> None:
+    attribution = _review_attribution_report_from_args(args)
+    policy = build_attribution_policy(
+        attribution,
+        default_strategy=getattr(args, "default_strategy", "") or getattr(args, "strategy", "") or "manual_order",
+        effective_date=getattr(args, "effective_date", "") or getattr(args, "attribution_policy_date", ""),
+        warn_exposure_multiplier=getattr(args, "warn_exposure_multiplier", 0.5),
+    )
+    if getattr(args, "record", False):
+        _persist_attribution_policy(args, policy)
+    if getattr(args, "format", "json") == "markdown":
+        text = render_attribution_policy_markdown(policy)
+    else:
+        text = json.dumps(policy, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def _review_attribution_report_from_args(args: argparse.Namespace) -> dict:
+    trade_records = _trade_records_from_args(args)
+    plan_records = _trade_plan_records_from_args(args)
+    execution_records = _execution_confirmation_records_from_args(args)
+    approval_records = _order_approval_records_from_args(args)
+    trade_plan_audit = summarize_trade_plan_audit(plan_records, trade_records, limit=getattr(args, "limit", 12))
+    execution_audit = summarize_execution_audit(
+        execution_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        limit=getattr(args, "limit", 12),
+    )
+    approval_audit = summarize_approval_execution(
+        approval_records,
+        trade_records,
+        lookahead_days=getattr(args, "lookahead_days", 1),
+        value_tolerance_pct=getattr(args, "value_tolerance_pct", 0.02),
+        limit=getattr(args, "limit", 12),
+    )
+    approval_cooldown = summarize_approval_cooldown(
+        build_approval_cooldown_constraints(
+            approval_audit,
+            block_threshold=getattr(args, "block_threshold", 1),
+            warn_threshold=getattr(args, "warn_threshold", 2),
+            fallback_threshold=getattr(args, "fallback_threshold", 2),
+            warn_exposure_multiplier=getattr(args, "warn_exposure_multiplier", 0.5),
+        )
+    )
+    gate_review = summarize_gate_journal(trade_records, limit=getattr(args, "limit", 12))
+    trade_stats = summarize_trade_journal(trade_records)
+    lifecycle_snapshot = _latest_review_lifecycle_snapshot_from_args(args, limit=getattr(args, "limit", 12))
+    return build_review_attribution_report(
+        trade_plan_audit=trade_plan_audit,
+        execution_audit=execution_audit,
+        approval_audit=approval_audit,
+        approval_cooldown=approval_cooldown,
+        gate_review=gate_review,
+        trade_stats=trade_stats,
+        lifecycle_snapshot=lifecycle_snapshot,
+        limit=getattr(args, "limit", 12),
+    )
+
+
 def run_review_action_execution(args: argparse.Namespace) -> None:
-    action_records = read_position_action_plan_records(args.action_log)
+    action_records = _position_action_records_from_args(args)
     trade_records = _trade_records_from_args(args)
     summary = summarize_action_execution(
         action_records,
@@ -2376,7 +4526,7 @@ def run_review_action_execution(args: argparse.Namespace) -> None:
 
 
 def run_review_exit_audit(args: argparse.Namespace) -> None:
-    exit_records = read_exit_plan_records(args.exit_log)
+    exit_records = _exit_plan_records_from_args(args)
     trade_records = _trade_records_from_args(args)
     summary = summarize_exit_execution(
         exit_records,
@@ -2410,7 +4560,7 @@ def run_review_lot_stats(args: argparse.Namespace) -> None:
 
 
 def run_review_lot_exit_audit(args: argparse.Namespace) -> None:
-    exit_records = read_exit_plan_records(args.exit_log)
+    exit_records = _exit_plan_records_from_args(args)
     trade_records = _trade_records_from_args(args)
     summary = summarize_lot_exit_execution(
         exit_records,
@@ -2441,22 +4591,111 @@ def run_review_lifecycle(args: argparse.Namespace) -> None:
     print(text)
 
 
+def run_review_lifecycle_history(args: argparse.Namespace) -> None:
+    summary = build_review_history(
+        trade_plans=_trade_plan_records_from_args(args),
+        trades=_trade_records_from_args(args),
+        action_plans=_position_action_records_from_args(args),
+        exit_plans=_exit_plan_records_from_args(args),
+        lifecycle_snapshots=_lifecycle_snapshot_records_from_args(args),
+        limit=getattr(args, "limit", 20),
+    )
+    text = render_review_history_markdown(summary) if getattr(args, "format", "json") == "markdown" else json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_timeline_history(args: argparse.Namespace) -> None:
+    records = _trading_day_state_records_from_args(args)
+    summary = summarize_trading_day_state_records(records, limit=getattr(args, "limit", 20))
+    text = render_trading_day_state_history_markdown(summary) if getattr(args, "format", "json") == "markdown" else json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_timeline_watch(args: argparse.Namespace) -> None:
+    records = _trading_day_state_records_from_args(args)
+    report = build_trading_day_watchdog(
+        records,
+        as_of=getattr(args, "as_of", None),
+        repeat_threshold=getattr(args, "repeat_threshold", 2),
+        stale_days=getattr(args, "stale_days", 1),
+        limit=getattr(args, "limit", 20),
+    )
+    text = render_trading_day_watchdog_markdown(report) if getattr(args, "format", "json") == "markdown" else json.dumps(report, ensure_ascii=False, indent=2, default=str)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_doctor(args: argparse.Namespace) -> None:
+    report = _review_doctor_from_args(
+        args,
+        lifecycle_snapshots=_merge_lifecycle_snapshots(
+            _lifecycle_snapshot_records_from_args(args),
+            _position_lifecycle_snapshot_from_args(args, limit=getattr(args, "limit", 20)),
+        ),
+    )
+    text = (
+        render_review_doctor_markdown(report)
+        if getattr(args, "format", "json") == "markdown"
+        else json.dumps(report, ensure_ascii=False, indent=2, default=str)
+    )
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_review_approvals(args: argparse.Namespace) -> None:
+    records = _order_approval_records_from_args(args)
+    symbol = str(getattr(args, "symbol", "") or "").strip()
+    status = str(getattr(args, "status", "") or "").strip()
+    if symbol:
+        normalized = symbol.zfill(6)
+        records = [record for record in records if str(record.get("symbol", "")).zfill(6) == normalized]
+    if status:
+        records = [record for record in records if str(record.get("status", "") or "") == status]
+    summary = summarize_order_approvals(records, limit=getattr(args, "limit", 20))
+    text = (
+        render_order_approval_summary_markdown(summary)
+        if getattr(args, "format", "json") == "markdown"
+        else json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    )
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
 def run_portfolio_plan(args: argparse.Namespace) -> None:
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    current_strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=current_strategy_health,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
     temperature = calculate_market_temperature(frame, candidates).to_dict()
     allocation_plan = build_allocation_plan(
         candidates,
@@ -2465,7 +4704,7 @@ def run_portfolio_plan(args: argparse.Namespace) -> None:
         max_positions=args.top,
         regime_exposure=settings.risk.regime_exposure,
         cap_by_risk=settings.risk.cap_by_risk,
-        strategy_health=_current_strategy_health(args),
+        strategy_health=current_strategy_health,
     )
     result = run_pretrade_check(
         candidates,
@@ -2479,7 +4718,7 @@ def run_portfolio_plan(args: argparse.Namespace) -> None:
         max_positions=args.top,
         regime_exposure=settings.risk.regime_exposure,
         cap_by_risk=settings.risk.cap_by_risk,
-        strategy_health=_current_strategy_health(args),
+        strategy_health=current_strategy_health,
     )
     plan = build_trade_plan(
         symbol=args.symbol,
@@ -2496,7 +4735,11 @@ def run_portfolio_plan(args: argparse.Namespace) -> None:
     )
     payload = plan.to_dict()
     if getattr(args, "record", False):
-        append_jsonl(getattr(args, "log", Path("data/review/trade_plans.jsonl")), payload)
+        append_trade_plan_record(
+            getattr(args, "log", Path("data/review/trade_plans.jsonl")),
+            payload,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
     rendered = render_trade_plan_markdown(plan) if getattr(args, "format", "json") == "markdown" else json.dumps(payload, ensure_ascii=False, indent=2)
     if getattr(args, "output", None):
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2511,24 +4754,23 @@ def run_portfolio_plan_batch(args: argparse.Namespace) -> None:
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=strategy_health,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
     temperature = calculate_market_temperature(frame, candidates).to_dict()
     batch = build_trade_plan_batch(
         candidates=candidates,
         market_temperature=temperature,
         cash=args.cash,
         max_positions=args.top,
-        strategy_health=_current_strategy_health(args),
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=strategy_health,
         trade_date=getattr(args, "trade_date", None),
         discipline_exception=bool(getattr(args, "discipline_exception", False)),
         exception_reason=str(getattr(args, "exception_reason", "") or ""),
@@ -2539,9 +4781,14 @@ def run_portfolio_plan_batch(args: argparse.Namespace) -> None:
         sqlite_path=getattr(args, "sqlite", None),
     )
     payload = batch.to_dict()
+    persistence = {"persisted_count": 0, "skipped_existing_count": 0}
     if getattr(args, "record", False):
-        for plan in batch.plans:
-            append_trade_plan_record(getattr(args, "log", Path("data/review/trade_plans.jsonl")), plan)
+        persistence = append_unique_trade_plan_records(
+            getattr(args, "log", Path("data/review/trade_plans.jsonl")),
+            batch.plans,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+        payload["persistence"] = persistence
     rendered = render_trade_plan_batch_markdown(batch) if getattr(args, "format", "json") == "markdown" else json.dumps(payload, ensure_ascii=False, indent=2)
     if getattr(args, "output", None):
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2564,9 +4811,171 @@ def _trade_plan_from_args(args: argparse.Namespace) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _battle_plan_from_args(args: argparse.Namespace) -> dict | None:
+    path = getattr(args, "battle_plan", None)
+    if not path:
+        return None
+    if not path.exists():
+        raise FileNotFoundError(f"Battle plan not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Battle plan must be JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Battle plan JSON must be an object: {path}")
+    return payload
+
+
+def _execution_confirmation_from_args(args: argparse.Namespace) -> dict | None:
+    path = getattr(args, "execution_confirm", None)
+    if not path:
+        return None
+    if not path.exists():
+        raise FileNotFoundError(f"Execution confirmation not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Execution confirmation must be JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Execution confirmation JSON must be an object: {path}")
+    return payload
+
+
+def _order_approval_from_args(args: argparse.Namespace) -> dict | None:
+    path = getattr(args, "order_approval", None)
+    if not path:
+        return None
+    if not path.exists():
+        raise FileNotFoundError(f"Order approval not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Order approval must be JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Order approval JSON must be an object: {path}")
+    return payload
+
+
+def _assistant_payload_from_args(args: argparse.Namespace) -> dict:
+    path = getattr(args, "assistant_json", None)
+    if not path:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"Trading assistant JSON not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Trading assistant JSON must be JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Trading assistant JSON must be an object: {path}")
+    return payload
+
+
+def _battle_plan_payload_from_args(args: argparse.Namespace, frame: pd.DataFrame, pretrade_payload: dict | None = None) -> dict | None:
+    battle_plan = _battle_plan_from_args(args)
+    if battle_plan is not None:
+        return battle_plan
+    strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
+    strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
+        frame,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=strategy_health,
+    )
+    temperature = calculate_market_temperature(frame, candidates).to_dict()
+    allocation_plan = build_allocation_plan(
+        candidates,
+        temperature,
+        cash=args.cash,
+        max_positions=getattr(args, "top", 5),
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=strategy_health,
+    )
+    return build_final_battle_plan(
+        {
+            "market_temperature": temperature,
+            "allocation_plan": allocation_plan.to_dict(),
+            "holding_risk": {"status": "pass"},
+            "holding_action_plan": {"status": "pass"},
+            "exit_plan": {"status": "pass"},
+            "strategy_health": [strategy_health] if strategy_health else [],
+            "pretrade_checks": [pretrade_payload] if pretrade_payload else [],
+        },
+        limit=getattr(args, "top", 5),
+    )
+
+
+def _pretrade_payload_from_args(args: argparse.Namespace, frame: pd.DataFrame) -> dict:
+    path = getattr(args, "pretrade_json", None)
+    if path:
+        if not path.exists():
+            raise FileNotFoundError(f"Pretrade JSON not found: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Pretrade JSON must be an object: {path}")
+        return payload
+    strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
+    strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
+        frame,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=strategy_health,
+    )
+    temperature = calculate_market_temperature(frame, candidates).to_dict()
+    result = run_pretrade_check(
+        candidates,
+        temperature,
+        symbol=args.symbol,
+        entry_price=args.current_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        stop_price=getattr(args, "stop_price", None),
+        target_price=getattr(args, "target_price", None),
+        max_positions=getattr(args, "top", 5),
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=strategy_health,
+    )
+    return result.to_dict()
+
+
+def _execution_confirmation_payload_from_args(
+    args: argparse.Namespace,
+    pretrade_payload: dict,
+    frame: pd.DataFrame,
+) -> dict:
+    explicit = _execution_confirmation_from_args(args)
+    if explicit is not None:
+        return explicit
+    battle_plan = _battle_plan_payload_from_args(args, frame, pretrade_payload)
+    confirmation = build_execution_confirmation(
+        pretrade_payload,
+        battle_plan=battle_plan,
+        symbol=args.symbol,
+        current_price=args.current_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        reference_price=getattr(args, "reference_price", None),
+        warn_scale=getattr(args, "warn_scale", 0.5),
+        max_price_deviation_pct=getattr(args, "max_price_deviation_pct", 0.015),
+        hard_chase_pct=getattr(args, "hard_chase_pct", 0.03),
+        lot_size=getattr(args, "lot_size", 100),
+    )
+    return confirmation.to_dict()
+
+
 def _trade_plan_records_from_args(args: argparse.Namespace) -> list[dict]:
     if getattr(args, "sqlite", None):
-        return _sqlite_trade_records(args.sqlite)
+        return _sqlite_trade_plan_records(args.sqlite)
     path = (
         getattr(args, "plan_log", None)
         or getattr(args, "trade_plan_log", None)
@@ -2576,10 +4985,40 @@ def _trade_plan_records_from_args(args: argparse.Namespace) -> list[dict]:
     return read_trade_plan_records(path)
 
 
+def _execution_confirmation_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_execution_confirmation_records(args.sqlite)
+    path = getattr(args, "confirm_log", None) or getattr(args, "log", None) or Path("data/review/execution_confirms.jsonl")
+    return read_execution_confirmation_records(path)
+
+
+def _lifecycle_snapshot_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_lifecycle_snapshot_records(args.sqlite)
+    path = getattr(args, "lifecycle_log", None)
+    if not path:
+        return []
+    return read_jsonl(path)
+
+
+def _latest_review_lifecycle_snapshot_from_args(args: argparse.Namespace, *, limit: int = 20) -> dict:
+    records = list(_lifecycle_snapshot_records_from_args(args))
+    if records:
+        records.sort(key=lambda item: str(item.get("snapshot_date", "") or item.get("created_at", "") or ""))
+        return dict(records[-1])
+    return _position_lifecycle_snapshot_from_args(args, limit=limit)
+
+
 def _trade_plan_number(plan: dict | None, key: str, fallback: float | None) -> float | None:
     if plan and key in plan and plan.get(key) not in (None, ""):
         return float(plan.get(key))
     return fallback
+
+
+def _trade_plan_text(plan: dict | None, key: str) -> str:
+    if plan and key in plan:
+        return str(plan.get(key, "") or "")
+    return ""
 
 
 def _trade_plan_tags(plan: dict | None) -> list[str]:
@@ -2591,6 +5030,91 @@ def _trade_plan_tags(plan: dict | None) -> list[str]:
     if plan.get("discipline_exception"):
         tags.append("discipline-exception")
     return tags
+
+
+def _execution_confirm_tags(confirm: dict | None) -> list[str]:
+    if not confirm:
+        return []
+    tags = ["execution-confirm"]
+    status = str(confirm.get("status", "") or "")
+    if status:
+        tags.append(f"confirm-{status}")
+    if int(confirm.get("suggested_quantity", 0) or 0) <= 0:
+        tags.append("confirm-no-quantity")
+    return tags
+
+
+def _order_approval_tags(approval: dict | None) -> list[str]:
+    if not approval:
+        return []
+    tags = ["order-approval"]
+    status = str(approval.get("status", "") or "")
+    if status:
+        tags.append(f"approval-{status}")
+    if int(approval.get("suggested_quantity", 0) or 0) <= 0:
+        tags.append("approval-no-quantity")
+    return tags
+
+
+def _execution_confirm_text(confirm: dict | None, key: str) -> str:
+    if confirm and key in confirm:
+        return str(confirm.get(key, "") or "")
+    return ""
+
+
+def _execution_confirm_number(confirm: dict | None, key: str, fallback: float | None) -> float:
+    if confirm and confirm.get(key) not in (None, ""):
+        return float(confirm.get(key))
+    return float(fallback or 0.0)
+
+
+def _order_approval_text(approval: dict | None, key: str) -> str:
+    if approval and key in approval:
+        return str(approval.get(key, "") or "")
+    return ""
+
+
+def _order_approval_number(approval: dict | None, key: str, fallback: float | None) -> float:
+    if approval and approval.get(key) not in (None, ""):
+        return float(approval.get(key))
+    return float(fallback or 0.0)
+
+
+def _execution_confirm_optional_number(confirm: dict | None, key: str) -> float | None:
+    if not confirm or confirm.get(key) in (None, ""):
+        return None
+    return float(confirm.get(key))
+
+
+def _execution_confirm_nested_number(confirm: dict | None, parent: str, key: str, fallback: float | None) -> float | None:
+    nested = dict((confirm or {}).get(parent) or {})
+    if nested.get(key) not in (None, ""):
+        return float(nested.get(key))
+    return fallback
+
+
+def _execution_confirm_name(confirm: dict | None) -> str:
+    candidate = dict((confirm or {}).get("battle_candidate") or {})
+    if candidate.get("name"):
+        return str(candidate.get("name"))
+    pretrade = dict((confirm or {}).get("pretrade_result") or {})
+    snapshot = dict(pretrade.get("candidate_snapshot") or {})
+    return str(snapshot.get("name", "") or "")
+
+
+def _execution_confirm_reasons(confirm: dict | None) -> list[str]:
+    reasons: list[str] = []
+    for check in list((confirm or {}).get("checks", []) or []):
+        if str(check.get("status", "") or "") in {"warn", "block"}:
+            reasons.append(str(check.get("message", "") or ""))
+    return [item for item in reasons if item]
+
+
+def _trade_vs_confirm_price_gap(confirm: dict | None, trade_price: float) -> float | None:
+    confirmation_price = _execution_confirm_optional_number(confirm, "current_price")
+    if confirmation_price in (None, 0):
+        return None
+    return float(trade_price) / float(confirmation_price) - 1.0
 
 
 def _filter_gate_records(records: list[dict], *, strategy: str = "", symbol: str = "") -> list[dict]:
@@ -2750,6 +5274,264 @@ def _sqlite_discipline_records(sqlite_path: Path) -> list[dict]:
     return records
 
 
+def _sqlite_trade_plan_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_trade_plans()
+    records: list[dict] = []
+    for row in frame.sort_values(["trade_date", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "trade_date": row.get("trade_date", ""),
+                "symbol": row.get("symbol", ""),
+                "name": row.get("name", ""),
+                "strategy": row.get("strategy", ""),
+                "market_regime": row.get("market_regime", ""),
+                "stance": row.get("stance", ""),
+                "status": row.get("status", ""),
+                "gate_status": row.get("gate_status", ""),
+                "gate_reason": row.get("gate_reason", ""),
+                "planned_pct": row.get("planned_pct", 0),
+                "planned_value": row.get("planned_value", 0),
+                "allowed_pct": row.get("allowed_pct", 0),
+                "allowed_value": row.get("allowed_value", 0),
+                "entry_price": row.get("entry_price", 0),
+                "stop_price": row.get("stop_price"),
+                "target_price": row.get("target_price"),
+                "discipline_exception": bool(row.get("discipline_exception", 0)),
+                "exception_reason": row.get("exception_reason", ""),
+            }
+        )
+    return records
+
+
+def _sqlite_position_action_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_position_action_plans()
+    records: list[dict] = []
+    for row in frame.sort_values(["action_date", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "action_date": row.get("action_date", ""),
+                "status": row.get("status", ""),
+                "total_actions": row.get("total_actions", 0),
+                "exit_count": row.get("exit_count", 0),
+                "reduce_count": row.get("reduce_count", 0),
+                "watch_count": row.get("watch_count", 0),
+                "hold_count": row.get("hold_count", 0),
+                "action_items": _loads_json_array(row.get("action_items_json")),
+                "actions": [],
+            }
+        )
+    return records
+
+
+def _sqlite_exit_plan_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_exit_plans()
+    records: list[dict] = []
+    for row in frame.sort_values(["plan_date", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "plan_date": row.get("plan_date", ""),
+                "status": row.get("status", ""),
+                "total_positions": row.get("total_positions", 0),
+                "sell_all_count": row.get("sell_all_count", 0),
+                "take_profit_count": row.get("take_profit_count", 0),
+                "reduce_count": row.get("reduce_count", 0),
+                "time_stop_count": row.get("time_stop_count", 0),
+                "invalidated_count": row.get("invalidated_count", 0),
+                "watch_count": row.get("watch_count", 0),
+                "hold_count": row.get("hold_count", 0),
+                "total_sell_quantity": row.get("total_sell_quantity", 0),
+                "expected_cash_release": row.get("expected_cash_release", 0),
+                "action_items": _loads_json_array(row.get("action_items_json")),
+                "items": [],
+            }
+        )
+    return records
+
+
+def _sqlite_lifecycle_snapshot_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_lifecycle_snapshots()
+    records: list[dict] = []
+    for row in frame.sort_values(["snapshot_date", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "snapshot_date": row.get("snapshot_date", ""),
+                "status": row.get("status", ""),
+                "trade_plan": {"records": row.get("trade_plan_records", 0)},
+                "lots": {
+                    "open_lots": row.get("open_lots", 0),
+                    "stale_open_lots": row.get("stale_open_lots", 0),
+                },
+                "holding_actions": {
+                    "exit_count": row.get("action_exit_count", 0),
+                    "reduce_count": row.get("action_reduce_count", 0),
+                },
+                "exit_plan": {
+                    "sell_all_count": row.get("exit_sell_all_count", 0),
+                    "take_profit_count": row.get("exit_take_profit_count", 0),
+                },
+                "execution": {
+                    "trade_plan_match_rate": row.get("trade_plan_match_rate", 0),
+                    "action_execution_rate": row.get("action_execution_rate", 0),
+                    "exit_execution_rate": row.get("exit_execution_rate", 0),
+                    "lot_exit_execution_rate": row.get("lot_exit_execution_rate", 0),
+                },
+            }
+        )
+    return records
+
+
+def _sqlite_trading_day_state_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_trading_day_states()
+    records: list[dict] = []
+    for row in frame.sort_values(["state_date", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "date": row.get("state_date", ""),
+                "source": row.get("source", ""),
+                "status": row.get("status", ""),
+                "phase_count": row.get("phase_count", 0),
+                "pass_count": row.get("pass_count", 0),
+                "warn_count": row.get("warn_count", 0),
+                "block_count": row.get("block_count", 0),
+                "action_item_count": row.get("action_item_count", 0),
+                "phases": [],
+                "action_items": [],
+            }
+        )
+    return records
+
+
+def _sqlite_order_approval_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_order_approvals()
+    records: list[dict] = []
+    if frame.empty:
+        return records
+    for row in frame.sort_values(["created_at", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "symbol": row.get("symbol", ""),
+                "status": row.get("status", ""),
+                "decision": row.get("decision", ""),
+                "confirmed_pct": row.get("confirmed_pct", 0),
+                "confirmed_value": row.get("confirmed_value", 0),
+                "suggested_quantity": row.get("suggested_quantity", 0),
+                "evidence": _loads_json_object(row.get("evidence_json")),
+                "reasons": _loads_json_array(row.get("reasons_json")),
+                "action_items": _loads_json_array(row.get("action_items_json")),
+            }
+        )
+    return records
+
+
+def _sqlite_execution_confirmation_records(sqlite_path: Path) -> list[dict]:
+    frame = SQLiteStore(sqlite_path).read_execution_confirmations()
+    records: list[dict] = []
+    if frame.empty:
+        return records
+    for row in frame.sort_values(["created_at", "id"]).to_dict(orient="records"):
+        payload = _loads_json_object(row.get("payload_json"))
+        if payload:
+            records.append(payload)
+            continue
+        records.append(
+            {
+                "created_at": row.get("created_at", ""),
+                "symbol": row.get("symbol", ""),
+                "status": row.get("status", ""),
+                "decision": row.get("decision", ""),
+                "current_price": row.get("current_price", 0),
+                "reference_price": row.get("reference_price"),
+                "price_deviation_pct": row.get("price_deviation_pct"),
+                "requested_pct": row.get("requested_pct", 0),
+                "confirmed_pct": row.get("confirmed_pct", 0),
+                "requested_value": row.get("requested_value", 0),
+                "confirmed_value": row.get("confirmed_value", 0),
+                "suggested_quantity": row.get("suggested_quantity", 0),
+                "lot_size": row.get("lot_size", 100),
+                "final_gate_status": row.get("final_gate_status", ""),
+                "pretrade_status": row.get("pretrade_status", ""),
+                "checks": _loads_json_array(row.get("checks_json")),
+                "action_items": _loads_json_array(row.get("action_items_json")),
+            }
+        )
+    return records
+
+
+def _existing_fingerprints_for_review_source(store: SQLiteStore, name: str) -> set[str]:
+    readers = {
+        "selections": store.read_selections,
+        "trades": store.read_trades,
+        "promotions": store.read_strategy_promotions,
+        "constraints": store.read_strategy_constraints,
+        "discipline": store.read_discipline_records,
+        "trade_plans": store.read_trade_plans,
+        "action_plans": store.read_position_action_plans,
+        "exit_plans": store.read_exit_plans,
+        "lifecycle_snapshots": store.read_lifecycle_snapshots,
+        "trading_day_states": store.read_trading_day_states,
+        "order_approvals": store.read_order_approvals,
+        "execution_confirmations": store.read_execution_confirmations,
+    }
+    reader = readers.get(name)
+    if reader is None:
+        return set()
+    frame = reader()
+    if frame.empty or "payload_json" not in frame.columns:
+        return set()
+    result: set[str] = set()
+    for value in frame["payload_json"].tolist():
+        payload = _loads_json_object(value)
+        if payload:
+            result.add(_record_fingerprint(payload))
+    return result
+
+
+def _dedupe_review_records(records: list[dict], existing: set[str]) -> list[dict]:
+    result: list[dict] = []
+    seen = set(existing)
+    for record in records:
+        fingerprint = _record_fingerprint(record)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        result.append(record)
+    return result
+
+
+def _record_fingerprint(record: dict) -> str:
+    return json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _trade_records_from_args(args: argparse.Namespace) -> list[dict]:
     if getattr(args, "sqlite", None):
         return _sqlite_trade_records(args.sqlite)
@@ -2762,6 +5544,50 @@ def _discipline_records_from_args(args: argparse.Namespace) -> list[dict]:
         return _sqlite_discipline_records(args.sqlite)
     path = getattr(args, "discipline_log", None) or getattr(args, "log", None) or Path("data/review/discipline.jsonl")
     return read_discipline_records(path)
+
+
+def _trading_day_state_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_trading_day_state_records(args.sqlite)
+    path = getattr(args, "state_log", None) or Path("data/review/trading_day_states.jsonl")
+    return read_trading_day_state_records(path)
+
+
+def _order_approval_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_order_approval_records(args.sqlite)
+    path = getattr(args, "approval_log", None) or getattr(args, "log", None) or Path("data/review/order_approvals.jsonl")
+    return read_order_approval_records(path)
+
+
+def _persist_trading_day_state_from_args(args: argparse.Namespace, source: str, timeline: dict) -> dict:
+    state = build_trading_day_state(
+        timeline,
+        trading_date=str(getattr(args, "as_of", "") or "")[:10],
+        source=source,
+    )
+    if getattr(args, "record_state", False):
+        append_trading_day_state_record(
+            getattr(args, "state_log", Path("data/review/trading_day_states.jsonl")),
+            state,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+    return state
+
+
+def _trading_day_watchdog_from_args(args: argparse.Namespace, current_state: dict | None = None) -> dict:
+    records = list(_trading_day_state_records_from_args(args))
+    if current_state:
+        current_fingerprint = _record_fingerprint(current_state)
+        if all(_record_fingerprint(record) != current_fingerprint for record in records):
+            records.append(current_state)
+    return build_trading_day_watchdog(
+        records,
+        as_of=getattr(args, "as_of", None),
+        repeat_threshold=getattr(args, "repeat_threshold", 2),
+        stale_days=getattr(args, "stale_days", 1),
+        limit=getattr(args, "limit", getattr(args, "top", 20)),
+    )
 
 
 def _persist_discipline_from_args(
@@ -2797,10 +5623,13 @@ def _promotion_records_from_args(args: argparse.Namespace) -> list[dict]:
 
 
 def _trade_plan_pressure_from_args(args: argparse.Namespace) -> dict[str, float | int]:
-    path = getattr(args, "trade_plan_log", None)
-    if not path:
-        return {}
-    records = read_trade_plan_records(path)
+    if getattr(args, "sqlite", None):
+        records = _sqlite_trade_plan_records(args.sqlite)
+    else:
+        path = getattr(args, "trade_plan_log", None)
+        if not path:
+            return {}
+        records = read_trade_plan_records(path)
     if not records:
         return {}
     pressure = summarize_trade_plan_audit(records, _trade_records_from_args(args), limit=20)
@@ -2820,8 +5649,29 @@ def _strategy_health_from_args(args: argparse.Namespace) -> list[dict]:
     if not (selections or trades or promotions):
         return []
     audit_map = _trade_plan_audit_by_strategy_from_args(args)
+    trade_plan_records = _trade_plan_records_from_args(args)
+    action_plan_records = _position_action_records_from_args(args)
+    exit_plan_records = _exit_plan_records_from_args(args)
+    lifecycle_records = _lifecycle_snapshot_records_from_args(args)
     lifecycle_snapshot = _position_lifecycle_snapshot_from_args(args, limit=20)
-    lifecycle_pressure = build_lifecycle_pressure(lifecycle_snapshot)
+    has_review_memory = bool(lifecycle_records or trade_plan_records or action_plan_records or exit_plan_records)
+    lifecycle_pressure = {}
+    if has_review_memory:
+        lifecycle_window = _merge_lifecycle_snapshots(lifecycle_records, lifecycle_snapshot)
+        doctor_report = _review_doctor_from_args(
+            args,
+            trade_plans=trade_plan_records,
+            action_plans=action_plan_records,
+            exit_plans=exit_plan_records,
+            lifecycle_snapshots=lifecycle_window,
+        )
+        lifecycle_pressure = build_review_memory_pressure(
+            lifecycle_snapshots=lifecycle_window,
+            doctor_report=doctor_report,
+            limit=5,
+        )
+    if not lifecycle_pressure and lifecycle_snapshot:
+        lifecycle_pressure = build_lifecycle_pressure(lifecycle_snapshot)
     strategy_health = summarize_strategy_health(
         selections,
         trades,
@@ -2830,12 +5680,11 @@ def _strategy_health_from_args(args: argparse.Namespace) -> list[dict]:
         lifecycle_pressure=lifecycle_pressure,
     )
     constraint_records = _constraint_records_from_args(args)
-    policy = settings_from_args(args).risk.constraint_policy
     return [
         apply_constraint_policy_to_health(
             item.to_dict(),
             constraint_records,
-            **policy.kwargs_for(item.strategy),
+            **_constraint_policy_kwargs_from_args(args, item.strategy),
         )
         for item in strategy_health
     ]
@@ -2854,8 +5703,48 @@ def _current_strategy_health(args: argparse.Namespace) -> dict:
     return apply_constraint_policy_to_health(
         base,
         _constraint_records_from_args(args),
-        **settings_from_args(args).risk.constraint_policy.kwargs_for(strategy_name),
+        **_constraint_policy_kwargs_from_args(args, strategy_name),
     )
+
+
+def _review_doctor_from_args(
+    args: argparse.Namespace,
+    *,
+    trade_plans: list[dict] | None = None,
+    action_plans: list[dict] | None = None,
+    exit_plans: list[dict] | None = None,
+    lifecycle_snapshots: list[dict] | None = None,
+    trading_day_states: list[dict] | None = None,
+) -> dict:
+    return build_review_doctor_report(
+        selections=_selection_records_from_args(args),
+        trades=_trade_records_from_args(args),
+        trade_plans=list(trade_plans if trade_plans is not None else _trade_plan_records_from_args(args)),
+        execution_confirmations=_execution_confirmation_records_from_args(args),
+        action_plans=list(action_plans if action_plans is not None else _position_action_records_from_args(args)),
+        exit_plans=list(exit_plans if exit_plans is not None else _exit_plan_records_from_args(args)),
+        lifecycle_snapshots=list(lifecycle_snapshots if lifecycle_snapshots is not None else _lifecycle_snapshot_records_from_args(args)),
+        trading_day_states=list(trading_day_states if trading_day_states is not None else _trading_day_state_records_from_args(args)),
+    )
+
+
+def _merge_lifecycle_snapshots(records: list[dict], current_snapshot: dict | None) -> list[dict]:
+    merged = list(records or [])
+    if not current_snapshot:
+        return merged
+    current_date = str(current_snapshot.get("snapshot_date", "") or "")
+    current_status = str(current_snapshot.get("status", "") or "")
+    if merged and not current_date:
+        return merged
+    for item in merged:
+        if (
+            str(item.get("snapshot_date", "") or "") == current_date
+            and str(item.get("status", "") or "") == current_status
+        ):
+            return merged
+    merged.append(current_snapshot)
+    merged.sort(key=lambda item: str(item.get("snapshot_date", "") or item.get("created_at", "") or ""))
+    return merged
 
 
 def _pretrade_preview_from_report_inputs(
@@ -2955,9 +5844,145 @@ def _discipline_adherence_summary_from_args(
 def _constraint_records_from_args(args: argparse.Namespace) -> list[dict]:
     sqlite_path = getattr(args, "sqlite", None)
     if sqlite_path:
+        records = _sqlite_constraint_records(sqlite_path)
+    else:
+        path = getattr(args, "constraint_log", None) or Path("data/review/strategy_constraints.jsonl")
+        records = read_constraint_audit_records(path)
+    auto_constraints = _auto_approval_cooldown_constraints_from_args(args)
+    return _merge_constraint_records(records, auto_constraints)
+
+
+def _approval_cooldown_payload_from_args(args: argparse.Namespace) -> dict:
+    cached = getattr(args, "_auto_approval_cooldown_payload", None)
+    if isinstance(cached, dict):
+        return cached
+    if getattr(args, "disable_approval_cooldown", False):
+        payload = summarize_approval_cooldown([])
+        payload["approval_audit"] = {}
+        args._auto_approval_cooldown_payload = payload
+        return payload
+    audit_summary = summarize_approval_execution(
+        _order_approval_records_from_args(args),
+        _trade_records_from_args(args),
+        lookahead_days=getattr(args, "approval_lookahead_days", getattr(args, "lookahead_days", 1)),
+        value_tolerance_pct=getattr(args, "approval_value_tolerance_pct", getattr(args, "value_tolerance_pct", 0.02)),
+        limit=getattr(args, "limit", 20) or 20,
+    )
+    constraints = build_approval_cooldown_constraints(
+        audit_summary,
+        block_threshold=getattr(args, "approval_block_threshold", getattr(args, "block_threshold", 1)),
+        warn_threshold=getattr(args, "approval_warn_threshold", getattr(args, "warn_threshold", 2)),
+        fallback_threshold=getattr(args, "approval_fallback_threshold", getattr(args, "fallback_threshold", 2)),
+        warn_exposure_multiplier=getattr(args, "approval_warn_exposure_multiplier", getattr(args, "warn_exposure_multiplier", 0.5)),
+    )
+    payload = summarize_approval_cooldown(constraints)
+    payload["approval_audit"] = audit_summary
+    args._auto_approval_cooldown_payload = payload
+    return payload
+
+
+def _auto_approval_cooldown_constraints_from_args(args: argparse.Namespace) -> list[dict]:
+    return list(_approval_cooldown_payload_from_args(args).get("constraints") or [])
+
+
+def _record_auto_approval_cooldown_from_args(args: argparse.Namespace) -> dict:
+    payload = _approval_cooldown_payload_from_args(args)
+    constraints = list(payload.get("constraints") or [])
+    existing = _constraint_records_without_auto(args)
+    existing_keys = {_constraint_record_identity(record) for record in existing}
+    imported = 0
+    skipped = 0
+    if getattr(args, "record_approval_cooldown", False):
+        for record in constraints:
+            key = _constraint_record_identity(record)
+            if key in existing_keys:
+                skipped += 1
+                continue
+            persist_constraint_audit(
+                record,
+                log_path=getattr(args, "constraint_log", None),
+                sqlite_path=getattr(args, "sqlite", None),
+            )
+            existing_keys.add(key)
+            imported += 1
+    result = dict(payload)
+    result["persisted_count"] = imported
+    result["skipped_existing_count"] = skipped
+    result["record_requested"] = bool(getattr(args, "record_approval_cooldown", False))
+    return result
+
+
+def _persist_attribution_policy(args: argparse.Namespace, policy: dict) -> dict:
+    constraints = list(policy.get("constraints") or [])
+    existing = _constraint_records_without_auto(args)
+    existing_keys = {_constraint_record_identity(record) for record in existing}
+    persisted = 0
+    skipped = 0
+    for record in constraints:
+        key = _constraint_record_identity(record)
+        if key in existing_keys:
+            skipped += 1
+            continue
+        persist_constraint_audit(
+            record,
+            log_path=getattr(args, "constraint_log", None),
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+        existing_keys.add(key)
+        persisted += 1
+    discipline_record = dict(policy.get("discipline_record") or {})
+    if discipline_record:
+        persist_discipline_record(
+            discipline_record,
+            log_path=getattr(args, "discipline_log", None),
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+    policy["persisted_count"] = persisted
+    policy["skipped_existing_count"] = skipped
+    policy["discipline_persisted"] = bool(discipline_record)
+    return {
+        "persisted_count": persisted,
+        "skipped_existing_count": skipped,
+        "discipline_persisted": bool(discipline_record),
+    }
+
+
+def _constraint_records_without_auto(args: argparse.Namespace) -> list[dict]:
+    sqlite_path = getattr(args, "sqlite", None)
+    if sqlite_path:
         return _sqlite_constraint_records(sqlite_path)
     path = getattr(args, "constraint_log", None) or Path("data/review/strategy_constraints.jsonl")
     return read_constraint_audit_records(path)
+
+
+def _merge_constraint_records(records: list[dict], auto_constraints: list[dict]) -> list[dict]:
+    merged = list(records or [])
+    seen = {_constraint_record_identity(record) for record in merged}
+    for record in auto_constraints:
+        key = _constraint_record_identity(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(record)
+    return merged
+
+
+def _constraint_record_identity(record: dict) -> str:
+    return json.dumps(
+        {
+            "date": str(record.get("created_at", "") or "")[:10],
+            "source": record.get("source", ""),
+            "strategy": record.get("strategy", ""),
+            "symbol": record.get("symbol", ""),
+            "alert_level": record.get("alert_level", ""),
+            "action": record.get("action", ""),
+            "alerts": sorted(str(item) for item in list(record.get("alerts") or [])),
+            "note": record.get("note", ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
 
 
 def _selection_records_from_args(args: argparse.Namespace) -> list[dict]:
@@ -2981,10 +6006,7 @@ def _action_execution_summary_from_args(
     trade_records: list[dict] | None = None,
     limit: int = 10,
 ) -> dict | None:
-    action_log = getattr(args, "action_log", None)
-    if not action_log:
-        return None
-    records = read_position_action_plan_records(action_log)
+    records = _position_action_records_from_args(args)
     if not records:
         return None
     trades = trade_records if trade_records is not None else _trade_records_from_args(args)
@@ -2992,10 +6014,7 @@ def _action_execution_summary_from_args(
 
 
 def _latest_exit_plan_from_args(args: argparse.Namespace) -> dict | None:
-    exit_log = getattr(args, "exit_log", None)
-    if not exit_log:
-        return None
-    records = read_exit_plan_records(exit_log)
+    records = _exit_plan_records_from_args(args)
     if not records:
         return None
     return records[-1]
@@ -3007,10 +6026,7 @@ def _exit_execution_summary_from_args(
     trade_records: list[dict] | None = None,
     limit: int = 10,
 ) -> dict | None:
-    exit_log = getattr(args, "exit_log", None)
-    if not exit_log:
-        return None
-    records = read_exit_plan_records(exit_log)
+    records = _exit_plan_records_from_args(args)
     if not records:
         return None
     trades = trade_records if trade_records is not None else _trade_records_from_args(args)
@@ -3023,10 +6039,7 @@ def _lot_exit_execution_summary_from_args(
     trade_records: list[dict] | None = None,
     limit: int = 10,
 ) -> dict | None:
-    exit_log = getattr(args, "exit_log", None)
-    if not exit_log:
-        return None
-    records = read_exit_plan_records(exit_log)
+    records = _exit_plan_records_from_args(args)
     if not records:
         return None
     trades = trade_records if trade_records is not None else _trade_records_from_args(args)
@@ -3035,18 +6048,28 @@ def _lot_exit_execution_summary_from_args(
 
 def _position_lifecycle_snapshot_from_args(args: argparse.Namespace, *, limit: int = 20) -> dict:
     prices = parse_price_overrides(getattr(args, "price", []) or [])
+    stops = parse_price_overrides(getattr(args, "stop", []) or [])
     trade_records = _trade_records_from_args(args)
     lot_book = build_lot_book(trade_records, prices=prices, as_of=getattr(args, "as_of", None)).to_dict()
+    position_book = build_position_book(trade_records, cash=getattr(args, "cash", 100000), prices=prices)
+    lifecycle_rule_plan = build_lifecycle_rule_plan(
+        position_book,
+        stops=stops,
+        discipline_summary=summarize_trade_journal(trade_records),
+        max_probe_pct=getattr(args, "max_probe_pct", 0.05),
+        max_position_pct=getattr(args, "max_position_pct", 0.2),
+        add_step_pct=getattr(args, "add_step_pct", 0.05),
+        add_profit_trigger_pct=getattr(args, "add_profit_trigger_pct", 0.03),
+        reduce_loss_warning_pct=getattr(args, "reduce_loss_warning_pct", 0.03),
+    ).to_dict()
     trade_plan_summary = build_trade_plan_summary(_trade_plan_records_from_args(args), limit=limit)
     action_execution_summary = _action_execution_summary_from_args(args, trade_records=trade_records, limit=limit)
     exit_execution_summary = _exit_execution_summary_from_args(args, trade_records=trade_records, limit=limit)
     lot_exit_execution_summary = _lot_exit_execution_summary_from_args(args, trade_records=trade_records, limit=limit)
     holding_action_plan = None
-    action_log = getattr(args, "action_log", None)
-    if action_log:
-        action_records = read_position_action_plan_records(action_log)
-        if action_records:
-            holding_action_plan = action_records[-1]
+    action_records = _position_action_records_from_args(args)
+    if action_records:
+        holding_action_plan = action_records[-1]
     exit_plan = _latest_exit_plan_from_args(args)
     trade_plan_audit = summarize_trade_plan_audit(_trade_plan_records_from_args(args), trade_records, limit=limit)
     return build_position_lifecycle_snapshot(
@@ -3054,6 +6077,7 @@ def _position_lifecycle_snapshot_from_args(args: argparse.Namespace, *, limit: i
         lot_book=lot_book,
         holding_action_plan=holding_action_plan,
         exit_plan=exit_plan,
+        lifecycle_rule_plan=lifecycle_rule_plan,
         trade_plan_audit=trade_plan_audit,
         action_execution_summary=action_execution_summary,
         exit_execution_summary=exit_execution_summary,
@@ -3061,9 +6085,41 @@ def _position_lifecycle_snapshot_from_args(args: argparse.Namespace, *, limit: i
     )
 
 
-def _constraint_policy_kwargs_from_args(args: argparse.Namespace) -> dict:
+def _position_action_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_position_action_records(args.sqlite)
+    action_log = getattr(args, "action_log", None)
+    if not action_log:
+        return []
+    return read_position_action_plan_records(action_log)
+
+
+def _exit_plan_records_from_args(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "sqlite", None):
+        return _sqlite_exit_plan_records(args.sqlite)
+    exit_log = getattr(args, "exit_log", None)
+    if not exit_log:
+        return []
+    return read_exit_plan_records(exit_log)
+
+
+def _constraint_policy_kwargs_from_args(args: argparse.Namespace, strategy: str = "") -> dict:
     policy = settings_from_args(args).risk.constraint_policy
-    return policy.kwargs_for(str(getattr(args, "strategy", "") or ""))
+    kwargs = dict(policy.kwargs_for(strategy or str(getattr(args, "strategy", "") or "")))
+    as_of = _policy_as_of_from_args(args)
+    if as_of is not None:
+        kwargs["as_of"] = as_of
+    return kwargs
+
+
+def _policy_as_of_from_args(args: argparse.Namespace) -> date | None:
+    value = str(getattr(args, "as_of", "") or getattr(args, "date", "") or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value[:10]).date()
+    except ValueError:
+        return None
 
 
 def _sqlite_trade_records(sqlite_path: Path) -> list[dict]:
@@ -3104,6 +6160,13 @@ def _sqlite_trade_records(sqlite_path: Path) -> list[dict]:
                 "workflow_summary": row.get("workflow_summary", ""),
                 "discipline_exception": bool(row.get("discipline_exception", 0)),
                 "exception_reason": row.get("exception_reason", ""),
+                "order_approval_path": row.get("order_approval_path", ""),
+                "order_approval_created_at": row.get("order_approval_created_at", ""),
+                "order_approval_status": row.get("order_approval_status", ""),
+                "order_approval_decision": row.get("order_approval_decision", ""),
+                "approved_pct": row.get("approved_pct", 0),
+                "approved_value": row.get("approved_value", 0),
+                "approved_quantity": row.get("approved_quantity", 0),
             }
         )
     return records
@@ -3133,17 +6196,14 @@ def run_market_temperature(args: argparse.Namespace) -> None:
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=_current_strategy_health(args),
         only_top_sectors=False,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
     temperature = calculate_market_temperature(frame, candidates)
     print(json.dumps(temperature.to_dict(), ensure_ascii=False, indent=2))
 
@@ -3152,14 +6212,15 @@ def run_market_sectors(args: argparse.Namespace) -> None:
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.top,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=_current_strategy_health(args),
         only_top_sectors=False,
+        sector_top=args.top,
+        top=0,
     )
     sectors = calculate_sector_strength(frame, candidates, sector_column=args.sector_column, top=args.top)
     print(json.dumps(sectors.to_dict(orient="records"), ensure_ascii=False, indent=2, default=str))
@@ -3169,17 +6230,14 @@ def run_portfolio_allocate(args: argparse.Namespace) -> None:
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=strategy_health,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
     temperature = calculate_market_temperature(frame, candidates).to_dict()
     plan = build_allocation_plan(
         candidates,
@@ -3188,7 +6246,7 @@ def run_portfolio_allocate(args: argparse.Namespace) -> None:
         max_positions=args.top,
         regime_exposure=settings.risk.regime_exposure,
         cap_by_risk=settings.risk.cap_by_risk,
-        strategy_health=_current_strategy_health(args),
+        strategy_health=strategy_health,
     )
     persist_constraint_audit(
         build_constraint_audit_record("portfolio.allocate", plan.strategy_constraint),
@@ -3202,17 +6260,14 @@ def run_portfolio_precheck(args: argparse.Namespace) -> None:
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)
-    candidates = strategy.screen(frame)
-    candidates = enrich_and_score_candidates(
+    strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
         frame,
-        candidates,
-        settings.scoring.weights,
-        sector_column=args.sector_column,
-        sector_top=args.sector_top,
-        only_top_sectors=args.only_top_sectors,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=strategy_health,
     )
-    if args.top:
-        candidates = candidates.head(args.top)
     temperature = calculate_market_temperature(frame, candidates).to_dict()
     result = run_pretrade_check(
         candidates,
@@ -3226,7 +6281,7 @@ def run_portfolio_precheck(args: argparse.Namespace) -> None:
         max_positions=args.top,
         regime_exposure=settings.risk.regime_exposure,
         cap_by_risk=settings.risk.cap_by_risk,
-        strategy_health=_current_strategy_health(args),
+        strategy_health=strategy_health,
     )
     persist_constraint_audit(
         build_constraint_audit_record("portfolio.precheck", result.strategy_constraint, symbol=args.symbol),
@@ -3237,6 +6292,174 @@ def run_portfolio_precheck(args: argparse.Namespace) -> None:
         print(render_precheck_markdown(result, temperature, settings_from_args(args)))
         return
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+
+
+def run_portfolio_confirm(args: argparse.Namespace) -> None:
+    frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
+    strategy = strategy_from_args(args)
+    args._resolved_strategy = strategy
+    settings = settings_from_args(args)
+    strategy_health = _current_strategy_health(args)
+    candidates = screened_candidates_from_args(
+        args,
+        frame,
+        strategy=strategy,
+        settings=settings,
+        strategy_health=strategy_health,
+    )
+    temperature = calculate_market_temperature(frame, candidates).to_dict()
+    allocation_plan = build_allocation_plan(
+        candidates,
+        temperature,
+        cash=args.cash,
+        max_positions=args.top,
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=strategy_health,
+    )
+    pretrade_result = run_pretrade_check(
+        candidates,
+        temperature,
+        symbol=args.symbol,
+        entry_price=args.current_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        stop_price=args.stop_price,
+        target_price=args.target_price,
+        max_positions=args.top,
+        regime_exposure=settings.risk.regime_exposure,
+        cap_by_risk=settings.risk.cap_by_risk,
+        strategy_health=strategy_health,
+    )
+    battle_plan = _battle_plan_from_args(args)
+    if battle_plan is None:
+        battle_plan = build_final_battle_plan(
+            {
+                "market_temperature": temperature,
+                "allocation_plan": allocation_plan.to_dict(),
+                "holding_risk": {"status": "pass"},
+                "holding_action_plan": {"status": "pass"},
+                "exit_plan": {"status": "pass"},
+                "strategy_health": [strategy_health] if strategy_health else [],
+                "pretrade_checks": [pretrade_result.to_dict()],
+            },
+            limit=args.top,
+        )
+    confirmation = build_execution_confirmation(
+        pretrade_result,
+        battle_plan=battle_plan,
+        symbol=args.symbol,
+        current_price=args.current_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        reference_price=getattr(args, "reference_price", None),
+        warn_scale=args.warn_scale,
+        max_price_deviation_pct=args.max_price_deviation_pct,
+        hard_chase_pct=args.hard_chase_pct,
+        lot_size=args.lot_size,
+    )
+    persist_constraint_audit(
+        build_constraint_audit_record("portfolio.confirm", pretrade_result.strategy_constraint, symbol=args.symbol),
+        log_path=getattr(args, "constraint_log", None),
+        sqlite_path=getattr(args, "sqlite", None),
+    )
+    if getattr(args, "record", False):
+        append_execution_confirmation_record(
+            getattr(args, "log", Path("data/review/execution_confirms.jsonl")),
+            confirmation,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+    payload = confirmation.to_dict()
+    rendered = (
+        render_execution_confirmation_markdown(confirmation)
+        if getattr(args, "format", "json") == "markdown"
+        else json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(rendered)
+
+
+def run_portfolio_tradable(args: argparse.Namespace) -> None:
+    frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
+    pretrade_payload = _pretrade_payload_from_args(args, frame)
+    confirmation_payload = _execution_confirmation_payload_from_args(args, pretrade_payload, frame)
+    battle_plan = _battle_plan_payload_from_args(args, frame, pretrade_payload)
+    result = build_tradability_check(
+        frame,
+        symbol=args.symbol,
+        current_price=args.current_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        pretrade_result=pretrade_payload,
+        confirmation=confirmation_payload,
+        battle_plan=battle_plan,
+        as_of=getattr(args, "as_of", None),
+        max_stale_days=args.max_stale_days,
+        limit_pct=args.limit_pct,
+        limit_buffer_pct=args.limit_buffer_pct,
+        lot_size=args.lot_size,
+    )
+    payload = result.to_dict()
+    rendered = render_tradability_markdown(result) if getattr(args, "format", "json") == "markdown" else json.dumps(payload, ensure_ascii=False, indent=2)
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(rendered)
+
+
+def run_portfolio_approve(args: argparse.Namespace) -> None:
+    frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
+    assistant_payload = _assistant_payload_from_args(args)
+    pretrade_payload = _pretrade_payload_from_args(args, frame)
+    confirmation_payload = _execution_confirmation_payload_from_args(args, pretrade_payload, frame)
+    battle_plan = _battle_plan_payload_from_args(args, frame, pretrade_payload)
+    tradability_result = build_tradability_check(
+        frame,
+        symbol=args.symbol,
+        current_price=args.current_price,
+        planned_pct=args.planned_pct,
+        cash=args.cash,
+        pretrade_result=pretrade_payload,
+        confirmation=confirmation_payload,
+        battle_plan=battle_plan,
+        as_of=getattr(args, "as_of", None),
+        max_stale_days=args.max_stale_days,
+        limit_pct=args.limit_pct,
+        limit_buffer_pct=args.limit_buffer_pct,
+        lot_size=args.lot_size,
+    )
+    approval = build_order_approval(
+        symbol=args.symbol,
+        assistant=assistant_payload,
+        battle_plan=battle_plan,
+        pretrade=pretrade_payload,
+        confirmation=confirmation_payload,
+        tradability=tradability_result.to_dict(),
+    )
+    if getattr(args, "record", False):
+        append_order_approval_record(
+            getattr(args, "log", Path("data/review/order_approvals.jsonl")),
+            approval,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
+    rendered = (
+        render_order_approval_markdown(approval)
+        if getattr(args, "format", "json") == "markdown"
+        else json.dumps(approval, ensure_ascii=False, indent=2, default=str)
+    )
+    if getattr(args, "output", None):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(str(args.output))
+        return
+    print(rendered)
+
 
 def run_portfolio_positions(args: argparse.Namespace) -> None:
     prices = parse_price_overrides(args.price)
@@ -3262,6 +6485,13 @@ def run_portfolio_lots(args: argparse.Namespace) -> None:
 
 def run_portfolio_lifecycle(args: argparse.Namespace) -> None:
     snapshot = _position_lifecycle_snapshot_from_args(args, limit=getattr(args, "limit", 20))
+    if getattr(args, "record", False) and getattr(args, "sqlite", None):
+        payload = dict(snapshot)
+        payload["created_at"] = datetime.now(timezone.utc).isoformat()
+        payload["snapshot_date"] = str(getattr(args, "as_of", "") or date.today().isoformat())
+        store = SQLiteStore(args.sqlite)
+        store.init()
+        store.insert_lifecycle_snapshot(payload, snapshot_date=payload["snapshot_date"])
     text = render_position_lifecycle_markdown(snapshot) if getattr(args, "format", "json") == "markdown" else json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
     if getattr(args, "output", None):
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -3305,7 +6535,11 @@ def run_portfolio_actions(args: argparse.Namespace) -> None:
         target_exposure_pct=getattr(args, "target_exposure_pct", None),
     )
     if getattr(args, "record", False):
-        append_position_action_plan_record(getattr(args, "log", Path("data/review/position_actions.jsonl")), action_plan)
+        append_position_action_plan_record(
+            getattr(args, "log", Path("data/review/position_actions.jsonl")),
+            action_plan,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
     if getattr(args, "format", "json") == "markdown":
         text = "\n".join(render_position_action_plan_lines(action_plan))
     else:
@@ -3351,7 +6585,11 @@ def run_portfolio_exit_plan(args: argparse.Namespace) -> None:
             plan_date=getattr(args, "plan_date", None),
         )
     if getattr(args, "record", False):
-        append_exit_plan_record(getattr(args, "log", Path("data/review/exit_plans.jsonl")), plan)
+        append_exit_plan_record(
+            getattr(args, "log", Path("data/review/exit_plans.jsonl")),
+            plan,
+            sqlite_path=getattr(args, "sqlite", None),
+        )
     if getattr(args, "format", "json") == "markdown":
         text = render_exit_plan_markdown(plan)
     else:
@@ -3425,6 +6663,118 @@ def run_optimize_experiments(args: argparse.Namespace) -> None:
         )
         print(str(args.summary_output))
 
+
+def run_optimize_structure_calibration(args: argparse.Namespace) -> None:
+    frame = read_ohlcv_csv(args.csv)
+    summary = run_structure_parameter_calibration(
+        frame,
+        base_params={
+            "min_20d_return": args.min_20d_return,
+            "min_volume_ratio": args.min_volume_ratio,
+            "max_volume_ratio": args.max_volume_ratio,
+            "max_atr_pct": args.max_atr_pct,
+            "min_ma20_slope": args.min_ma20_slope,
+            "max_close_ma20_gap": args.max_close_ma20_gap,
+            "max_rsi": args.max_rsi,
+            "min_traded_value": args.min_traded_value,
+        },
+        backtest_config=BacktestConfig(
+            initial_cash=args.cash,
+            max_position_pct=0.2,
+            commission_rate=0.0003,
+            slippage_rate=0.0005,
+            buy_price_field=args.buy_price,
+            execution_timing=args.execution_timing,
+        ),
+    )
+    text = (
+        render_calibration_markdown(summary)
+        if args.format == "markdown"
+        else json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    )
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_optimize_backtest_reliability(args: argparse.Namespace) -> None:
+    frame = read_ohlcv_csv(args.csv)
+    strategies = _reliability_strategies_from_args(args)
+    payload = build_backtest_reliability_audit(
+        frame,
+        strategies,
+        BacktestReliabilityConfig(
+            initial_cash=args.cash,
+            buy_price_field=args.buy_price,
+            execution_timing=args.execution_timing,
+            train_ratio=args.train_ratio,
+            regime_lookback=args.regime_lookback,
+            bull_threshold=args.bull_threshold,
+            bear_threshold=args.bear_threshold,
+            min_rows_per_symbol=args.min_rows_per_symbol,
+            max_stale_days=args.max_stale_days,
+            as_of=args.as_of,
+        ),
+    )
+    text = (
+        render_backtest_reliability_markdown(payload)
+        if args.format == "markdown"
+        else json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    )
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def run_optimize_portfolio_calibration(args: argparse.Namespace) -> None:
+    frame = read_ohlcv_csv(args.csv)
+    portfolio_config = StrategyPortfolioConfig.from_yaml(args.portfolio_config)
+    summary = run_strategy_portfolio_calibration(
+        frame,
+        portfolio_config,
+        variants=default_portfolio_calibration_variants(args.preset),
+        cash=args.cash,
+        buy_price=args.buy_price,
+        execution_timing=args.execution_timing,
+        rebalance_period=args.rebalance_period,
+        max_positions=args.max_positions,
+        min_history_days=args.min_history_days,
+        train_ratio=args.train_ratio,
+    )
+    text = (
+        render_strategy_portfolio_calibration_markdown(summary)
+        if args.format == "markdown"
+        else json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    )
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+        print(str(args.output))
+        return
+    print(text)
+
+
+def _reliability_strategies_from_args(args: argparse.Namespace) -> list[tuple[str, Any]]:
+    strategies: list[tuple[str, Any]] = []
+    for name in args.strategy or []:
+        strategies.append((name, create_strategy(name)))
+    for path in args.config or []:
+        strategy = create_strategy_from_config(path)
+        strategies.append((str(getattr(strategy, "config_name", "") or path.stem), strategy))
+    if not strategies:
+        strategies = [
+            ("trend_breakout", create_strategy("trend_breakout")),
+            ("strong_stock_screen", create_strategy("strong_stock_screen")),
+        ]
+    return strategies
+
+
 def run_optimize_export_strategy(args: argparse.Namespace) -> None:
     summary = load_experiment_summary(args.summary)
     config = strategy_config_from_summary(summary, name=args.name, description=args.description)
@@ -3462,6 +6812,7 @@ def run_optimize_promote_strategy(args: argparse.Namespace) -> None:
         frame=frame,
         backtest=args.backtest,
         buy_price_field=args.buy_price,
+        execution_timing=getattr(args, "execution_timing", "next_bar"),
         cash=args.cash,
         trade_plan_pressure=_trade_plan_pressure_from_args(args),
     )
@@ -3493,7 +6844,7 @@ def run_optimize_rotation(args: argparse.Namespace) -> None:
     promotion_summary = summarize_promotion_records(_promotion_records_from_args(args), limit=max(int(args.limit), 1))
     rotation = build_strategy_rotation(strategy_health, constraint_summary, promotion_summary, limit=args.limit)
     if args.format == "markdown":
-        text = "\n".join([f"生成时间：{created_at}", "", *render_strategy_rotation_lines(rotation)])
+        text = "\n".join([f"# Strategy Rotation {created_at}", "", *render_strategy_rotation_lines(rotation)])
         print(text)
         _write_rotation_outputs(args, text, "md", created_at)
         return
@@ -3530,7 +6881,7 @@ def run_optimize_rotation_history(args: argparse.Namespace) -> None:
     snapshots = read_rotation_snapshots(args.snapshot_dir, limit=args.limit)
     summary = summarize_rotation_history(snapshots)
     if args.format == "markdown":
-        text = "\n".join([*render_rotation_history_lines(summary), "", "## 历史卡片", "", *render_rotation_history_card_lines(summary)])
+        text = "\n".join([*render_rotation_history_lines(summary), "", "## Snapshot Cards", "", *render_rotation_history_card_lines(summary)])
     else:
         text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
     print(text)
@@ -3564,6 +6915,8 @@ def main() -> None:
     elif args.command == "workflow":
         if args.workflow_command == "premarket":
             run_workflow_premarket(args)
+        elif args.workflow_command in {"trading-day", "daily"}:
+            run_workflow_trading_day(args)
     elif args.command == "report":
         if args.report_command == "daily":
             run_daily_report(args)
@@ -3573,6 +6926,14 @@ def main() -> None:
             run_briefing_report(args)
         elif args.report_command == "premarket":
             run_premarket_report(args)
+        elif args.report_command == "battle-plan":
+            run_battle_plan_report(args)
+        elif args.report_command == "cockpit":
+            run_cockpit_report(args)
+        elif args.report_command == "timeline":
+            run_timeline_report(args)
+        elif args.report_command == "assistant":
+            run_assistant_report(args)
         elif args.report_command == "dragon":
             run_dragon_validation_report(args)
     elif args.command == "data":
@@ -3600,10 +6961,26 @@ def main() -> None:
                 run_data_db_import_universe(args)
             elif args.db_command == "import-daily":
                 run_data_db_import_daily(args)
+            elif args.db_command == "import-batch-daily":
+                run_data_db_import_batch_daily(args)
+            elif args.db_command == "import-adjustment":
+                run_data_db_import_adjustment(args)
+            elif args.db_command == "import-batch-adjustment":
+                run_data_db_import_batch_adjustment(args)
+            elif args.db_command == "import-minute":
+                run_data_db_import_minute(args)
+            elif args.db_command == "import-batch-minute":
+                run_data_db_import_batch_minute(args)
+            elif args.db_command == "import-review":
+                run_data_db_import_review(args)
             elif args.db_command == "screen":
                 run_data_db_screen(args)
             elif args.db_command == "health":
                 run_data_db_health(args)
+            elif args.db_command == "doctor":
+                run_data_db_doctor(args)
+            elif args.db_command == "catalog":
+                run_data_db_catalog(args)
             elif args.db_command == "sources":
                 print(json.dumps(settings_from_args(args).data_sources.__dict__, ensure_ascii=False, indent=2))
             else:
@@ -3619,6 +6996,16 @@ def main() -> None:
             run_review_trade_stats(args)
         elif args.review_command == "trade-audit":
             run_review_trade_audit(args)
+        elif args.review_command == "execution-audit":
+            run_review_execution_audit(args)
+        elif args.review_command == "approval-audit":
+            run_review_approval_audit(args)
+        elif args.review_command == "approval-cooldown":
+            run_review_approval_cooldown(args)
+        elif args.review_command == "attribution":
+            run_review_attribution(args)
+        elif args.review_command == "attribution-policy":
+            run_review_attribution_policy(args)
         elif args.review_command == "action-execution":
             run_review_action_execution(args)
         elif args.review_command == "exit-audit":
@@ -3629,6 +7016,16 @@ def main() -> None:
             run_review_lot_exit_audit(args)
         elif args.review_command == "lifecycle":
             run_review_lifecycle(args)
+        elif args.review_command == "lifecycle-history":
+            run_review_lifecycle_history(args)
+        elif args.review_command == "timeline-history":
+            run_review_timeline_history(args)
+        elif args.review_command == "timeline-watch":
+            run_review_timeline_watch(args)
+        elif args.review_command == "doctor":
+            run_review_doctor(args)
+        elif args.review_command == "approvals":
+            run_review_approvals(args)
         elif args.review_command == "gates":
             run_review_gates(args)
         elif args.review_command == "exceptions":
@@ -3651,6 +7048,12 @@ def main() -> None:
             run_portfolio_allocate(args)
         elif args.portfolio_command == "precheck":
             run_portfolio_precheck(args)
+        elif args.portfolio_command == "confirm":
+            run_portfolio_confirm(args)
+        elif args.portfolio_command == "tradable":
+            run_portfolio_tradable(args)
+        elif args.portfolio_command == "approve":
+            run_portfolio_approve(args)
         elif args.portfolio_command == "plan":
             run_portfolio_plan(args)
         elif args.portfolio_command == "plan-batch":
@@ -3670,6 +7073,12 @@ def main() -> None:
     elif args.command == "optimize":
         if args.optimize_command == "experiments":
             run_optimize_experiments(args)
+        elif args.optimize_command == "structure-calibration":
+            run_optimize_structure_calibration(args)
+        elif args.optimize_command == "backtest-reliability":
+            run_optimize_backtest_reliability(args)
+        elif args.optimize_command == "portfolio-calibration":
+            run_optimize_portfolio_calibration(args)
         elif args.optimize_command == "export-strategy":
             run_optimize_export_strategy(args)
         elif args.optimize_command == "validate-strategy":

@@ -1,0 +1,50 @@
+name: adaptive_strategy_portfolio_calibrated
+description: Calibrated portfolio from compact sample calibration; disables probe sleeve and lowers single-position cap.
+duplicate_vote_bonus: 6.0
+max_position_pct: 0.18
+sleeves:
+  - name: strong_stock_screen
+    role: main_attack
+    config: strategies/strong_stock_screen.yaml
+    enabled: true
+    enabled_regimes: [hot, warm, neutral]
+    budget_pct_by_regime:
+      hot: 0.55
+      warm: 0.42
+      neutral: 0.14
+      cold: 0.0
+      frozen: 0.0
+      empty: 0.0
+    max_candidates: 5
+    score_weight: 1.05
+    vote_bonus: 5.0
+  - name: steady_reversal_sharpe
+    role: defensive_supplement
+    config: strategies/steady_reversal_sharpe.yaml
+    enabled: true
+    enabled_regimes: [hot, warm, neutral, cold]
+    budget_pct_by_regime:
+      hot: 0.15
+      warm: 0.18
+      neutral: 0.16
+      cold: 0.08
+      frozen: 0.0
+      empty: 0.0
+    max_candidates: 5
+    score_weight: 0.95
+    vote_bonus: 4.0
+  - name: trend_breakout
+    role: probe
+    config: strategies/trend_breakout.yaml
+    enabled: false
+    enabled_regimes: [hot, warm]
+    budget_pct_by_regime:
+      hot: 0.0
+      warm: 0.0
+      neutral: 0.0
+      cold: 0.0
+      frozen: 0.0
+      empty: 0.0
+    max_candidates: 3
+    score_weight: 0.80
+    vote_bonus: 2.0

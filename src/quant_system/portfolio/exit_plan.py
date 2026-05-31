@@ -9,6 +9,7 @@ from typing import Any
 from quant_system.portfolio.positions import PositionBook
 from quant_system.portfolio.lots import build_lot_book
 from quant_system.storage.jsonl import append_jsonl, read_jsonl
+from quant_system.storage.sqlite_store import SQLiteStore
 
 
 @dataclass(frozen=True)
@@ -239,9 +240,13 @@ def render_exit_plan_markdown(plan: dict[str, Any] | ExitPlan | None) -> str:
     return "\n".join(["# Exit Plan", "", *render_exit_plan_lines(plan), ""])
 
 
-def append_exit_plan_record(path: Path, plan: ExitPlan | dict[str, Any]) -> None:
+def append_exit_plan_record(path: Path, plan: ExitPlan | dict[str, Any], sqlite_path: Path | None = None) -> None:
     payload = plan.to_dict() if isinstance(plan, ExitPlan) else dict(plan)
     append_jsonl(path, payload)
+    if sqlite_path is not None:
+        store = SQLiteStore(sqlite_path)
+        store.init()
+        store.insert_exit_plan(payload)
 
 
 def read_exit_plan_records(path: Path) -> list[dict[str, Any]]:

@@ -6,7 +6,12 @@ import pandas as pd
 import quant_system.cli as cli
 from quant_system.risk.pretrade import run_pretrade_check
 from quant_system.risk.sizing import build_allocation_plan
-from quant_system.portfolio.trade_plan import build_trade_plan, render_trade_plan_markdown
+from quant_system.portfolio.trade_plan import (
+    append_unique_trade_plan_records,
+    build_trade_plan,
+    build_trade_plan_batch,
+    render_trade_plan_markdown,
+)
 from quant_system.portfolio.trade_plan_audit import summarize_trade_plan_audit
 
 
@@ -302,6 +307,54 @@ def test_trade_plan_audit_matches_plan_and_trade(tmp_path):
     assert summary["unmatched_plans"] == 0
     assert summary["orphan_trades"] == 0
     assert summary["match_rate"] == 1.0
+
+
+def test_trade_plan_batch_blocks_when_strategy_is_paused():
+    candidates = pd.DataFrame(
+        {
+            "symbol": ["000001"],
+            "name": ["Demo"],
+            "score": [100],
+            "risk_grade": ["low"],
+            "close": [10.0],
+            "atr_stop_price": [9.0],
+        }
+    )
+
+    batch = build_trade_plan_batch(
+        candidates=candidates,
+        market_temperature={"regime": "warm", "stance": "watch"},
+        cash=100000,
+        max_positions=1,
+        strategy_health={"strategy": "strong_stock_screen", "alert_level": "block", "action": "pause"},
+        trade_date="2026-05-30",
+    )
+
+    assert batch.total_plans == 0
+    assert batch.status == "block"
+    assert batch.gate_status == "block"
+
+
+def test_append_unique_trade_plan_records_skips_repeat_runs(tmp_path):
+    log_path = tmp_path / "trade_plans.jsonl"
+    plan = {
+        "created_at": "2026-05-30T01:00:00+00:00",
+        "trade_date": "2026-05-30",
+        "symbol": "000001",
+        "strategy": "strong_stock_screen",
+        "status": "pass",
+        "gate_status": "pass",
+        "planned_pct": 0.1,
+        "entry_price": 10.0,
+    }
+    rerun_plan = {**plan, "created_at": "2026-05-30T02:00:00+00:00"}
+
+    first = append_unique_trade_plan_records(log_path, [plan])
+    second = append_unique_trade_plan_records(log_path, [rerun_plan])
+
+    assert first == {"persisted_count": 1, "skipped_existing_count": 0}
+    assert second == {"persisted_count": 0, "skipped_existing_count": 1}
+    assert len(log_path.read_text(encoding="utf-8").strip().splitlines()) == 1
 
 
 def test_review_trade_audit_cli_uses_explicit_plan_log(tmp_path, capsys):

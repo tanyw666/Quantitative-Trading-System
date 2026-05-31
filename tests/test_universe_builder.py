@@ -25,3 +25,16 @@ def test_filter_universe_excludes_st_bj_and_optional_boards():
     )
 
     assert filtered["symbol"].tolist() == ["000001"]
+
+
+def test_normalize_universe_drops_invalid_source_codes():
+    raw = pd.DataFrame(
+        {
+            "code": ["000001", None, "nan", "600000"],
+            "name": ["Demo1", "Broken", "BrokenText", "Demo2"],
+        }
+    )
+
+    normalized = normalize_universe(raw)
+
+    assert normalized["symbol"].tolist() == ["000001", "600000"]

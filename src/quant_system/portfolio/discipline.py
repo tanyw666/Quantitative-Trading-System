@@ -36,9 +36,13 @@ def build_discipline_record(
         "status": _discipline_status(gate_review, trade_stats, holding_risk, allocation_plan),
         "advice": advice,
         "gate_violation_count": int(gate_review.get("violation_count", 0) or 0),
+        "structure_violation_count": int(gate_review.get("structure_violation_count", 0) or 0),
+        "structure_reason_counts": dict(gate_review.get("by_structure_reason", {}) or {}),
         "missing_gate_count": int(gate_review.get("missing_gate_count", 0) or 0),
         "avg_execution_deviation_pct": float(trade_stats.get("avg_execution_deviation_pct", 0) or 0),
         "mistake_counts": dict(trade_stats.get("mistake_counts", {}) or {}),
+        "emotion_counts": dict(trade_stats.get("emotion_counts", {}) or {}),
+        "emotional_trade_count": int(trade_stats.get("emotional_trade_count", 0) or 0),
         "holding_status": str(holding_risk.get("status", "") or ""),
         "target_exposure_pct": float(allocation_plan.get("target_exposure_pct", 0) or 0),
         "allocated_pct": float(allocation_plan.get("allocated_pct", 0) or 0),
@@ -82,11 +86,15 @@ def _discipline_status(gate_review: dict, trade_stats: dict, holding_risk: dict,
     allocated = float(allocation_plan.get("allocated_pct", 0) or 0)
     if holding_status == "block" or (target == 0 and allocated > 0):
         return "block"
+    if int(gate_review.get("structure_violation_count", 0) or 0) >= 2:
+        return "block"
     if (
         int(gate_review.get("violation_count", 0) or 0)
+        or int(gate_review.get("structure_violation_count", 0) or 0)
         or int(gate_review.get("missing_gate_count", 0) or 0)
         or abs(float(trade_stats.get("avg_execution_deviation_pct", 0) or 0)) >= 0.02
         or trade_stats.get("mistake_counts")
+        or int(trade_stats.get("emotional_trade_count", 0) or 0)
         or holding_status == "warn"
         or (target > 0 and allocated > target * 1.05)
     ):

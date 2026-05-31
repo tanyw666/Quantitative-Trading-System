@@ -8,7 +8,7 @@ def render_discipline_exception_lines(summary: dict | None) -> list[str]:
     lines = [
         f"- Trades scanned: {int(summary.get('total_trades', 0) or 0)}",
         f"- Exception count: {int(summary.get('exception_count', 0) or 0)}",
-        f"- Approved / missing reason: {int(summary.get('approved_exception_count', 0) or 0)} / {int(summary.get('missing_reason_count', 0) or 0)}",
+        f"- Explained / missing reason: {int(summary.get('approved_exception_count', 0) or 0)} / {int(summary.get('missing_reason_count', 0) or 0)}",
         f"- Exception rate: {float(summary.get('exception_rate', 0) or 0):.1%}",
     ]
     top_strategy = _top_item(summary.get("by_strategy", {}))
@@ -23,9 +23,23 @@ def render_discipline_exception_lines(summary: dict | None) -> list[str]:
         lines.extend(["", "## Action Items", ""])
         lines.extend(f"- {item}" for item in action_items)
 
+    missing = list(summary.get("latest_missing_reason", []) or [])
+    if missing:
+        lines.extend(["", "## Missing Reasons", ""])
+        lines.extend(["| Date | Symbol | Side | Strategy | Sources |", "| --- | --- | --- | --- | --- |"])
+        for record in missing:
+            lines.append(
+                f"| {record.get('date', '')} | "
+                f"{_symbol_label(record)} | "
+                f"{record.get('side', '')} | "
+                f"{record.get('strategy', '')} | "
+                f"{_join(record.get('exception_sources', []))} |"
+            )
+
     records = list(summary.get("records", []) or [])
     if records:
-        lines.extend(["", "| Date | Symbol | Side | Strategy | Gate | Reason |", "| --- | --- | --- | --- | --- | --- |"])
+        lines.extend(["", "## Recent Exceptions", ""])
+        lines.extend(["| Date | Symbol | Side | Strategy | Gate | Sources | Reason |", "| --- | --- | --- | --- | --- | --- | --- |"])
         for record in records:
             lines.append(
                 f"| {record.get('date', '')} | "
@@ -33,6 +47,7 @@ def render_discipline_exception_lines(summary: dict | None) -> list[str]:
                 f"{record.get('side', '')} | "
                 f"{record.get('strategy', '')} | "
                 f"{record.get('gate_status', '')} | "
+                f"{_join(record.get('exception_sources', []))} | "
                 f"{record.get('exception_reason', '')} |"
             )
     return lines
@@ -52,3 +67,9 @@ def _top_item(values: dict | None) -> tuple[str, int] | None:
 def _symbol_label(record: dict) -> str:
     label = f"{record.get('symbol', '')} {record.get('name', '')}".strip()
     return label or "-"
+
+
+def _join(values: object) -> str:
+    if isinstance(values, list):
+        return ", ".join(str(item) for item in values if str(item))
+    return str(values or "")

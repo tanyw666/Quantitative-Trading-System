@@ -1,13 +1,19 @@
-from quant_system.config.settings import SystemSettings
+from pathlib import Path
+
+from quant_system.config.settings import SystemSettings, load_settings
 import pytest
 
 
 def test_system_settings_defaults_are_reasonable():
     settings = SystemSettings()
-    assert settings.scoring.weights["momentum_20"] == 0.5
+    assert settings.scoring.weights["momentum_20"] == 0.35
+    assert settings.scoring.weights["ma20_slope_5"] == 0.12
     assert settings.risk.cap_by_risk["medium"] == 0.12
     assert settings.risk.constraint_policy.window_days == 5
+    assert settings.risk.constraint_policy.recover_probe_days == 2
+    assert settings.risk.constraint_policy.recover_probe_exposure_multiplier == 0.25
     assert settings.risk.constraint_policy.warn_exposure_multiplier == 0.5
+    assert settings.trading_day.phases == {}
 
 
 def test_system_settings_from_mapping_overrides_defaults():
@@ -17,7 +23,13 @@ def test_system_settings_from_mapping_overrides_defaults():
             "risk": {
                 "regime_exposure": {"warm": 0.5},
                 "cap_by_risk": {"medium": 0.1},
-                "constraint_policy": {"recover_after_clean_days": 4, "warn_exposure_multiplier": 0.4},
+                "constraint_policy": {
+                    "recover_after_clean_days": 4,
+                    "recover_probe_days": 3,
+                    "recover_probe_exposure_multiplier": 0.2,
+                    "recover_trade_plan_match_rate_min": 0.92,
+                    "warn_exposure_multiplier": 0.4,
+                },
             },
         }
     )
@@ -26,6 +38,9 @@ def test_system_settings_from_mapping_overrides_defaults():
     assert settings.risk.regime_exposure["warm"] == 0.5
     assert settings.risk.cap_by_risk["medium"] == 0.1
     assert settings.risk.constraint_policy.recover_after_clean_days == 4
+    assert settings.risk.constraint_policy.recover_probe_days == 3
+    assert settings.risk.constraint_policy.recover_probe_exposure_multiplier == 0.2
+    assert settings.risk.constraint_policy.recover_trade_plan_match_rate_min == 0.92
     assert settings.risk.constraint_policy.warn_exposure_multiplier == 0.4
 
 
@@ -40,6 +55,24 @@ def test_system_settings_loads_data_source_preferences():
     assert settings.data_sources.universe_source == "akshare"
 
 
+def test_system_settings_loads_trading_day_phase_templates():
+    settings = SystemSettings.from_mapping(
+        {
+            "trading_day": {
+                "phases": {
+                    "intraday": {
+                        "title": "盘中执行阶段",
+                        "extra_checklist": ["确认盘口"],
+                    }
+                }
+            }
+        }
+    )
+
+    assert settings.trading_day.phases["intraday"]["title"] == "盘中执行阶段"
+    assert settings.trading_day.phases["intraday"]["extra_checklist"] == ["确认盘口"]
+
+
 def test_constraint_policy_supports_strategy_overrides():
     settings = SystemSettings.from_mapping(
         {
@@ -47,7 +80,12 @@ def test_constraint_policy_supports_strategy_overrides():
                 "constraint_policy": {
                     "recover_after_clean_days": 3,
                     "strategies": {
-                        "dragon-leader": {"recover_after_clean_days": 5, "warn_exposure_multiplier": 0.3}
+                        "dragon-leader": {
+                            "recover_after_clean_days": 5,
+                            "recover_probe_days": 4,
+                            "recover_probe_exposure_multiplier": 0.2,
+                            "warn_exposure_multiplier": 0.3,
+                        }
                     },
                 }
             }
@@ -58,5 +96,15 @@ def test_constraint_policy_supports_strategy_overrides():
     base = settings.risk.constraint_policy.kwargs_for("strong_stock_screen")
 
     assert dragon["recover_after_clean_days"] == 5
+    assert dragon["recover_probe_days"] == 4
+    assert dragon["recover_probe_exposure_multiplier"] == 0.2
     assert dragon["warn_exposure_multiplier"] == 0.3
     assert base["recover_after_clean_days"] == 3
+
+
+def test_load_settings_reads_default_system_yaml():
+    settings = load_settings(Path("configs/system.yaml"))
+
+    assert settings.data_sources.daily_source == "csv"
+    assert settings.trading_day.phases["premarket"]["extra_checklist"][0] == "确认最终作战单已经生成并留档"
+    assert settings.risk.constraint_policy.warn_exposure_multiplier == 0.5

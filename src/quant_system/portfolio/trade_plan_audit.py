@@ -154,6 +154,7 @@ def apply_trade_plan_audit_to_health(strategy_health: dict[str, Any], audit_summ
         return adjusted
 
     match_rate = float(audit_summary.get("match_rate", 0) or 0)
+    matched_trades = int(audit_summary.get("matched_trades", 0) or (1 if match_rate > 0 else 0))
     avg_price_deviation_pct = float(audit_summary.get("avg_price_deviation_pct", 0) or 0)
     unmatched_plans = int(audit_summary.get("unmatched_plans", 0) or 0)
     orphan_trades = int(audit_summary.get("orphan_trades", 0) or 0)
@@ -172,7 +173,7 @@ def apply_trade_plan_audit_to_health(strategy_health: dict[str, Any], audit_summ
     }
 
     alerts = list(adjusted.get("alerts", []) or [])
-    if match_rate < 0.7 or orphan_trades >= 2 or unmatched_plans >= 3:
+    if orphan_trades >= 2 or (matched_trades > 0 and match_rate < 0.7):
         adjusted["alert_level"] = "block"
         adjusted["action"] = "pause"
         alerts = _merge_unique(alerts, "trade_plan_mismatch", "trade_plan_block")

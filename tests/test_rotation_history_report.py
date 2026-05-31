@@ -114,6 +114,37 @@ def test_summarize_rotation_history_tracks_trade_plan_match_rate():
     assert strategy["low_trade_plan_match_count"] == 2
 
 
+def test_summarize_rotation_history_tracks_lifecycle_memory_pressure():
+    summary = summarize_rotation_history(
+        [
+            {
+                "created_at": "2026-05-29T09:00:00+00:00",
+                "items": [
+                    {
+                        "strategy": "dragon",
+                        "rotation_score": 82,
+                        "priority": "主打",
+                        "action": "作为下个交易日主策略",
+                        "lifecycle_pressure": {"score": 62, "alert_level": "block", "doctor_status": "warn"},
+                    },
+                    {
+                        "strategy": "dragon",
+                        "rotation_score": 75,
+                        "priority": "观察",
+                        "action": "只做计划内确认单",
+                        "lifecycle_pressure": {"score": 78, "alert_level": "warn", "doctor_status": "pass"},
+                    },
+                ],
+            }
+        ]
+    )
+
+    strategy = summary["strategies"][0]
+    assert strategy["avg_lifecycle_score"] == 70.0
+    assert strategy["lifecycle_block_count"] == 1
+    assert strategy["doctor_warn_count"] == 1
+
+
 def test_render_rotation_history_card_lines_mentions_low_trade_plan_match():
     lines = render_rotation_history_card_lines(
         {
@@ -134,6 +165,28 @@ def test_render_rotation_history_card_lines_mentions_low_trade_plan_match():
     )
 
     assert "计划失配偏多" in "\n".join(lines)
+
+
+def test_render_rotation_history_card_lines_mentions_lifecycle_pressure_hotspots():
+    lines = render_rotation_history_card_lines(
+        {
+            "snapshot_count": 1,
+            "first_created_at": "2026-05-29T09:00:00+00:00",
+            "latest_created_at": "2026-05-29T09:00:00+00:00",
+            "strategies": [
+                {
+                    "strategy": "dragon",
+                    "latest_rotation_score": 80,
+                    "trend": "flat",
+                    "main_count": 1,
+                    "pause_count": 0,
+                    "lifecycle_block_count": 2,
+                }
+            ],
+        }
+    )
+
+    assert "Lifecycle pressure hotspots" in "\n".join(lines)
 
 
 def test_render_rotation_history_lines_mentions_trade_plan_pressure():

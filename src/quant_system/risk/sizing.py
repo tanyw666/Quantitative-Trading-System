@@ -54,6 +54,7 @@ class AllocationPlan:
     strategy_action: str = ""
     strategy_adjustment_note: str = ""
     strategy_constraint: dict | None = None
+    strategy_exposure_multiplier: float = 1.0
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -75,16 +76,43 @@ def build_allocation_plan(
     regime_exposure = regime_exposure or REGIME_EXPOSURE
     cap_by_risk = cap_by_risk or RISK_CAP
     health_multiplier = _strategy_health_multiplier(strategy_health)
+    policy_multiplier = _strategy_policy_multiplier(strategy_health)
+    exposure_multiplier = min(health_multiplier, policy_multiplier)
     raw_target_exposure_pct = regime_exposure.get(regime, 0.0)
-    target_exposure_pct = raw_target_exposure_pct * health_multiplier
+    target_exposure_pct = raw_target_exposure_pct * exposure_multiplier
     target_exposure_value = cash * target_exposure_pct
     alert_level = str((strategy_health or {}).get("alert_level", "pass") or "pass")
     action = str((strategy_health or {}).get("action", "") or "")
     adjustment_note = _strategy_adjustment_note(strategy_health, raw_target_exposure_pct, target_exposure_pct)
+    memory_note = _strategy_memory_note(strategy_health)
+    if memory_note:
+        if adjustment_note:
+            adjustment_note = f"{adjustment_note} {memory_note}"
+        elif target_exposure_pct < raw_target_exposure_pct:
+            adjustment_note = (
+                f"策略记忆将目标总仓位由 {raw_target_exposure_pct:.1%} "
+                f"下调至 {target_exposure_pct:.1%}。{memory_note}"
+            )
+        else:
+            adjustment_note = memory_note
     strategy_constraint = _strategy_constraint(strategy_health, alert_level, action, adjustment_note)
 
     if candidates.empty or target_exposure_pct <= 0:
-        return AllocationPlan(cash, regime, stance, target_exposure_pct, target_exposure_value, 0.0, 0.0, [], alert_level, action, adjustment_note, strategy_constraint)
+        return AllocationPlan(
+            cash,
+            regime,
+            stance,
+            target_exposure_pct,
+            target_exposure_value,
+            0.0,
+            0.0,
+            [],
+            alert_level,
+            action,
+            adjustment_note,
+            strategy_constraint,
+            exposure_multiplier,
+        )
 
     selected = candidates.copy().head(max_positions)
     if "score" not in selected.columns:
@@ -113,7 +141,10 @@ def build_allocation_plan(
         for idx in active_list:
             row = selected.loc[idx]
             risk_grade = str(row.get("risk_grade", "unknown"))
-            max_pct = min(cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)) * health_multiplier, remaining_pct)
+            max_pct = min(
+                _candidate_position_cap(row, cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)) * exposure_multiplier),
+                remaining_pct,
+            )
             desired_pct = remaining_pct * float(active_weights.loc[idx]) / weight_sum
             target_pct = min(desired_pct, max_pct)
             if target_pct > epsilon:
@@ -134,7 +165,10 @@ def build_allocation_plan(
         if target_pct <= epsilon:
             continue
         risk_grade = str(row.get("risk_grade", "unknown"))
-        max_pct = cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)) * health_multiplier
+        max_pct = _candidate_position_cap(
+            row,
+            cap_by_risk.get(risk_grade, cap_by_risk.get("unknown", 0.05)) * exposure_multiplier,
+        )
         allocated_pct += target_pct
         stop_price = row.get("atr_stop_price", None)
         if pd.isna(stop_price):
@@ -167,6 +201,7 @@ def build_allocation_plan(
         strategy_action=action,
         strategy_adjustment_note=adjustment_note,
         strategy_constraint=strategy_constraint,
+        strategy_exposure_multiplier=exposure_multiplier,
     )
 
 
@@ -180,6 +215,37 @@ def _strategy_health_multiplier(strategy_health: dict | None) -> float:
     if alert_level == "warn":
         return 0.5
     return 1.0
+
+
+def _candidate_position_cap(row: pd.Series, default_cap: float) -> float:
+    value = row.get("position_cap_pct")
+    if value in (None, "") or pd.isna(value):
+        return default_cap
+    return min(default_cap, max(float(value), 0.0))
+
+
+def _strategy_policy_multiplier(strategy_health: dict | None) -> float:
+    if not strategy_health:
+        return 1.0
+    value = strategy_health.get("policy_exposure_multiplier")
+    if value in (None, ""):
+        return 1.0
+    return max(0.0, min(float(value), 1.0))
+
+
+def _strategy_memory_note(strategy_health: dict | None) -> str:
+    if not strategy_health:
+        return ""
+    parts: list[str] = []
+    policy_note = str(strategy_health.get("policy_note", "") or "")
+    if policy_note:
+        parts.append(policy_note)
+    lifecycle_pressure = strategy_health.get("lifecycle_pressure") or {}
+    if isinstance(lifecycle_pressure, dict):
+        summary = str(lifecycle_pressure.get("summary", "") or "")
+        if summary:
+            parts.append(f"复盘记忆：{summary}")
+    return " | ".join(parts)
 
 
 def _allocation_reason(regime: str, risk_grade: str, target_pct: float, max_pct: float) -> str:
@@ -197,12 +263,12 @@ def _strategy_adjustment_note(strategy_health: dict | None, raw_target_exposure_
     if alert_level == "block" or strategy_health.get("action") == "pause":
         return (
             f"{strategy} 策略健康度阻断，目标总仓位由 {raw_target_exposure_pct:.1%} 下调至 0.0%。"
-            f" 触发：{trigger_text}"
+            f"触发：{trigger_text}"
         )
     if alert_level == "warn" and target_exposure_pct < raw_target_exposure_pct:
         return (
             f"{strategy} 策略健康度预警，目标总仓位由 {raw_target_exposure_pct:.1%} 下调至 {target_exposure_pct:.1%}。"
-            f" 触发：{trigger_text}"
+            f"触发：{trigger_text}"
         )
     return ""
 
@@ -210,10 +276,17 @@ def _strategy_adjustment_note(strategy_health: dict | None, raw_target_exposure_
 def _strategy_constraint(strategy_health: dict | None, alert_level: str, action: str, note: str) -> dict | None:
     if not strategy_health:
         return None
-    return {
+    constraint = {
         "strategy": str(strategy_health.get("strategy", "") or ""),
         "alert_level": alert_level,
         "action": action,
         "alerts": list(strategy_health.get("alerts", []) or []),
         "note": note,
     }
+    if strategy_health.get("policy_state"):
+        constraint["policy_state"] = str(strategy_health.get("policy_state", "") or "")
+    if strategy_health.get("policy_exposure_multiplier") not in (None, ""):
+        constraint["policy_exposure_multiplier"] = strategy_health.get("policy_exposure_multiplier")
+    if strategy_health.get("lifecycle_pressure"):
+        constraint["lifecycle_pressure"] = strategy_health.get("lifecycle_pressure")
+    return constraint

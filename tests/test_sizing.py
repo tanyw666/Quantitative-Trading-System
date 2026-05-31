@@ -95,3 +95,39 @@ def test_build_allocation_plan_blocks_exposure_on_strategy_pause():
     assert "错误集中" in plan.strategy_adjustment_note
     assert plan.strategy_constraint["action"] == "pause"
     assert plan.strategy_constraint["alert_level"] == "block"
+
+
+def test_build_allocation_plan_applies_policy_multiplier_even_without_alert_escalation():
+    candidates = pd.DataFrame(
+        {
+            "symbol": ["000001"],
+            "name": ["A"],
+            "score": [100],
+            "risk_grade": ["low"],
+            "atr_stop_price": [9.0],
+        }
+    )
+
+    plan = build_allocation_plan(
+        candidates,
+        {"regime": "warm", "stance": "test"},
+        cash=100000,
+        max_positions=1,
+        regime_exposure={"warm": 0.6},
+        cap_by_risk={"low": 0.5, "unknown": 0.05},
+        strategy_health={
+            "strategy": "demo",
+            "alert_level": "pass",
+            "action": "keep",
+            "alerts": ["trade_plan_drift"],
+            "policy_exposure_multiplier": 0.4,
+            "policy_note": "plan drift requires smaller size",
+            "lifecycle_pressure": {"summary": "window 3; lifecycle block 0, warn 1"},
+        },
+    )
+
+    assert plan.target_exposure_pct == 0.24
+    assert plan.strategy_exposure_multiplier == 0.4
+    assert plan.strategy_constraint["policy_exposure_multiplier"] == 0.4
+    assert "plan drift requires smaller size" in plan.strategy_adjustment_note
+    assert "复盘记忆" in plan.strategy_adjustment_note

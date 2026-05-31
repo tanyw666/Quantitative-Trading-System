@@ -3,3 +3,11 @@ description: 均线趋势突破策略样例
 strategy: trend_breakout
 params:
   min_momentum: 0.03
+  min_ma20_slope: 0.0
+  max_close_ma20_gap: 0.45
+  max_atr_pct: 0.16
+  min_traded_value: 20000000
+  min_entry_structure_score: 55.0
+  max_chase_risk_score: 35.0
+  max_candle_warning_count: 1
+  block_false_breakout: true

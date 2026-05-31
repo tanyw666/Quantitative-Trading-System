@@ -86,6 +86,25 @@ def test_build_strategy_rotation_penalizes_trade_plan_mismatch():
     assert "计划-成交失配严重" in rotation[-1]["reasons"]
 
 
+def test_build_strategy_rotation_rewards_recovered_policy_state():
+    rotation = build_strategy_rotation(
+        [
+            {
+                "strategy": "dragon",
+                "score": 74,
+                "action": "keep",
+                "alert_level": "pass",
+                "policy_state": "recovered",
+            }
+        ],
+        {},
+        {},
+    )
+
+    assert rotation[0]["strategy"] == "dragon"
+    assert "constraint recovery passed" in rotation[0]["reasons"]
+
+
 def test_render_strategy_rotation_lines_mentions_trade_plan_pressure():
     lines = render_strategy_rotation_lines(
         [

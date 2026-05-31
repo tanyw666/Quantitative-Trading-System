@@ -6,10 +6,24 @@ from typing import Any
 
 
 DEFAULT_SCORING_WEIGHTS = {
-    "momentum_20": 0.50,
-    "volume_ratio_20": 0.30,
-    "atr_pct_14": 0.20,
-    "sector_strength_score": 0.15,
+    "momentum_20": 0.35,
+    "volume_ratio_20": 0.18,
+    "atr_pct_14": 0.12,
+    "sector_strength_score": 0.10,
+    "ma20_slope_5": 0.12,
+    "close_to_ma20": 0.05,
+    "traded_value": 0.05,
+    "rsi_14": 0.03,
+    "trend_quality_score": 0.05,
+    "entry_structure_score": 0.08,
+    "chase_risk_score": 0.05,
+    "candle_warning_count": 0.02,
+    "tape_pressure_score": 0.04,
+    "tape_distribution_warning": 0.03,
+    "volume_confirmation_score": 0.03,
+    "candle_quality_score": 0.03,
+    "breakout_quality_score": 0.04,
+    "false_breakout_pressure": 0.03,
 }
 
 DEFAULT_REGIME_EXPOSURE = {
@@ -34,6 +48,11 @@ DEFAULT_CONSTRAINT_POLICY = {
     "single_block_pause": 1.0,
     "warn_escalation_count": 2.0,
     "recover_after_clean_days": 3.0,
+    "recover_probe_days": 2.0,
+    "recover_probe_exposure_multiplier": 0.25,
+    "recover_trade_plan_match_rate_min": 0.9,
+    "recover_max_unmatched_plans": 0.0,
+    "recover_max_orphan_trades": 0.0,
     "warn_exposure_multiplier": 0.5,
 }
 
@@ -50,6 +69,11 @@ class ConstraintPolicySettings:
     single_block_pause: int = 1
     warn_escalation_count: int = 2
     recover_after_clean_days: int = 3
+    recover_probe_days: int = 2
+    recover_probe_exposure_multiplier: float = 0.25
+    recover_trade_plan_match_rate_min: float = 0.9
+    recover_max_unmatched_plans: int = 0
+    recover_max_orphan_trades: int = 0
     warn_exposure_multiplier: float = 0.5
     strategy_overrides: dict[str, dict[str, float]] = field(default_factory=dict)
 
@@ -60,13 +84,31 @@ class ConstraintPolicySettings:
             "single_block_pause": self.single_block_pause,
             "warn_escalation_count": self.warn_escalation_count,
             "recover_after_clean_days": self.recover_after_clean_days,
+            "recover_probe_days": self.recover_probe_days,
+            "recover_probe_exposure_multiplier": self.recover_probe_exposure_multiplier,
+            "recover_trade_plan_match_rate_min": self.recover_trade_plan_match_rate_min,
+            "recover_max_unmatched_plans": self.recover_max_unmatched_plans,
+            "recover_max_orphan_trades": self.recover_max_orphan_trades,
             "warn_exposure_multiplier": self.warn_exposure_multiplier,
         }
         override = self.strategy_overrides.get(_normalize_strategy_name(strategy), {})
         for key, value in override.items():
-            if key in {"window_days", "cooldown_block_count", "single_block_pause", "warn_escalation_count", "recover_after_clean_days"}:
+            if key in {
+                "window_days",
+                "cooldown_block_count",
+                "single_block_pause",
+                "warn_escalation_count",
+                "recover_after_clean_days",
+                "recover_probe_days",
+                "recover_max_unmatched_plans",
+                "recover_max_orphan_trades",
+            }:
                 values[key] = int(value)
-            elif key == "warn_exposure_multiplier":
+            elif key in {
+                "warn_exposure_multiplier",
+                "recover_probe_exposure_multiplier",
+                "recover_trade_plan_match_rate_min",
+            }:
                 values[key] = float(value)
         return values
 
@@ -77,6 +119,11 @@ class ConstraintPolicySettings:
             "single_block_pause": self.single_block_pause,
             "warn_escalation_count": self.warn_escalation_count,
             "recover_after_clean_days": self.recover_after_clean_days,
+            "recover_probe_days": self.recover_probe_days,
+            "recover_probe_exposure_multiplier": self.recover_probe_exposure_multiplier,
+            "recover_trade_plan_match_rate_min": self.recover_trade_plan_match_rate_min,
+            "recover_max_unmatched_plans": self.recover_max_unmatched_plans,
+            "recover_max_orphan_trades": self.recover_max_orphan_trades,
             "warn_exposure_multiplier": self.warn_exposure_multiplier,
             "strategies": self.strategy_overrides,
         }
@@ -101,17 +148,25 @@ class DataSourceSettings:
 
 
 @dataclass(frozen=True)
+class TradingDaySettings:
+    phases: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SystemSettings:
     scoring: ScoringSettings = field(default_factory=ScoringSettings)
     risk: RiskSettings = field(default_factory=RiskSettings)
     data_sources: DataSourceSettings = field(default_factory=DataSourceSettings)
+    trading_day: TradingDaySettings = field(default_factory=TradingDaySettings)
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "SystemSettings":
         mapping = mapping or {}
         scoring_mapping = _require_mapping(mapping.get("scoring", {}), "scoring")
         risk_mapping = _require_mapping(mapping.get("risk", {}), "risk")
+        legacy_data_mapping = _require_mapping(mapping.get("data", {}), "data")
         data_mapping = _require_mapping(mapping.get("data_sources", {}), "data_sources")
+        trading_day_mapping = _require_mapping(mapping.get("trading_day", {}), "trading_day")
         return cls(
             scoring=ScoringSettings(weights=_merge(DEFAULT_SCORING_WEIGHTS, _require_mapping(scoring_mapping.get("weights", {}), "scoring.weights"))),
             risk=RiskSettings(
@@ -128,13 +183,18 @@ class SystemSettings:
                 ),
             ),
             data_sources=DataSourceSettings(
-                daily_source=str(data_mapping.get("daily_source", "auto")),
+                daily_source=str(data_mapping.get("daily_source", legacy_data_mapping.get("primary_source", "auto"))),
                 universe_source=str(data_mapping.get("universe_source", "auto")),
                 concept_source=str(data_mapping.get("concept_source", "auto")),
                 announcement_source=str(data_mapping.get("announcement_source", "auto")),
                 news_source=str(data_mapping.get("news_source", "auto")),
                 global_source=str(data_mapping.get("global_source", "auto")),
                 wencai_source=str(data_mapping.get("wencai_source", "auto")),
+            ),
+            trading_day=TradingDaySettings(
+                phases=_phase_template_mapping(
+                    _require_mapping(trading_day_mapping.get("phases", {}), "trading_day.phases")
+                ),
             ),
         )
 
@@ -173,6 +233,14 @@ def _require_mapping(value: Any, name: str) -> dict[str, Any]:
     return value
 
 
+def _phase_template_mapping(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    phases: dict[str, dict[str, Any]] = {}
+    for phase, raw in value.items():
+        mapping = _require_mapping(raw, f"trading_day.phases.{phase}")
+        phases[str(phase)] = dict(mapping)
+    return phases
+
+
 def _constraint_policy_settings(mapping: dict[str, Any]) -> ConstraintPolicySettings:
     raw_overrides = _require_mapping(mapping.get("strategies", {}), "risk.constraint_policy.strategies")
     numeric_override = {key: value for key, value in mapping.items() if key != "strategies"}
@@ -190,6 +258,11 @@ def _constraint_policy_settings(mapping: dict[str, Any]) -> ConstraintPolicySett
         single_block_pause=int(merged.get("single_block_pause", 1)),
         warn_escalation_count=int(merged.get("warn_escalation_count", 2)),
         recover_after_clean_days=int(merged.get("recover_after_clean_days", 3)),
+        recover_probe_days=int(merged.get("recover_probe_days", 2)),
+        recover_probe_exposure_multiplier=float(merged.get("recover_probe_exposure_multiplier", 0.25)),
+        recover_trade_plan_match_rate_min=float(merged.get("recover_trade_plan_match_rate_min", 0.9)),
+        recover_max_unmatched_plans=int(merged.get("recover_max_unmatched_plans", 0)),
+        recover_max_orphan_trades=int(merged.get("recover_max_orphan_trades", 0)),
         warn_exposure_multiplier=float(merged.get("warn_exposure_multiplier", 0.5)),
         strategy_overrides=strategy_overrides,
     )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 import re
@@ -30,10 +30,25 @@ class TableProvider(Protocol):
         ...
 
 
+class MinuteBarProvider(Protocol):
+    name: str
+
+    def fetch_minute(self, symbol: str, start: str, end: str, period: str = "1", adjust: str = "") -> pd.DataFrame:
+        ...
+
+
+class AdjustmentFactorProvider(Protocol):
+    name: str
+
+    def fetch_adjustment_factors(self, symbol: str, start: str, end: str, adjust: str = "qfq") -> pd.DataFrame:
+        ...
+
+
 @dataclass(frozen=True)
 class ProviderResult:
     provider: str
     frame: pd.DataFrame
+    attempts: list[dict[str, str]] = field(default_factory=list)
 
 
 def normalize_daily_bars(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -63,6 +78,9 @@ def normalize_daily_bars(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
         "turnover": "turnover",
         "\u6362\u624b\u7387": "turnover",
         "turnover_value": "amount",
+        "\u6da8\u8dcc\u5e45": "pct_change",
+        "pct_change": "pct_change",
+        "change_pct": "pct_change",
     }
     data = frame.rename(columns=rename_map).copy()
     required = ["date", "open", "high", "low", "close", "volume"]
@@ -71,14 +89,86 @@ def normalize_daily_bars(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
         raise ValueError(f"Provider returned missing columns: {missing}")
 
     data["symbol"] = str(symbol).zfill(6)
-    data["date"] = pd.to_datetime(data["date"])
+    data["date"] = pd.to_datetime(data["date"], errors="raise")
     for column in ["open", "high", "low", "close", "volume"]:
         data[column] = pd.to_numeric(data[column], errors="raise")
     if "amount" in data.columns:
         data["amount"] = pd.to_numeric(data["amount"], errors="coerce")
     if "turnover" in data.columns:
         data["turnover"] = pd.to_numeric(data["turnover"], errors="coerce")
-    return data.sort_values("date").reset_index(drop=True)
+    if "turnover_rate" not in data.columns and "turnover" in data.columns:
+        data["turnover_rate"] = data["turnover"]
+    if "pct_change" in data.columns:
+        data["pct_change"] = pd.to_numeric(data["pct_change"], errors="coerce")
+    data = _drop_daily_placeholder_rows(data)
+    data = data.sort_values("date").reset_index(drop=True)
+    if "pre_close" not in data.columns:
+        data["pre_close"] = data["close"].shift(1)
+    _validate_daily_frame(data, symbol)
+    return data
+
+
+def normalize_minute_bars(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    rename_map = {
+        "\u65f6\u95f4": "datetime",
+        "\u65e5\u671f\u65f6\u95f4": "datetime",
+        "date": "datetime",
+        "time": "datetime",
+        "datetime": "datetime",
+        "open": "open",
+        "\u5f00\u76d8": "open",
+        "close": "close",
+        "\u6536\u76d8": "close",
+        "high": "high",
+        "\u6700\u9ad8": "high",
+        "low": "low",
+        "\u6700\u4f4e": "low",
+        "volume": "volume",
+        "\u6210\u4ea4\u91cf": "volume",
+        "amount": "amount",
+        "\u6210\u4ea4\u989d": "amount",
+        "turnover": "turnover",
+        "\u6362\u624b\u7387": "turnover",
+    }
+    data = frame.rename(columns=rename_map).copy()
+    required = ["datetime", "open", "high", "low", "close", "volume"]
+    missing = [column for column in required if column not in data.columns]
+    if missing:
+        raise ValueError(f"Provider returned missing minute columns: {missing}")
+    data["symbol"] = str(symbol).zfill(6)
+    data["datetime"] = pd.to_datetime(data["datetime"], errors="raise")
+    for column in ["open", "high", "low", "close", "volume"]:
+        data[column] = pd.to_numeric(data[column], errors="raise")
+    if "amount" in data.columns:
+        data["amount"] = pd.to_numeric(data["amount"], errors="coerce")
+    if "turnover" in data.columns:
+        data["turnover"] = pd.to_numeric(data["turnover"], errors="coerce")
+    data = data.sort_values("datetime").reset_index(drop=True)
+    _validate_minute_frame(data, symbol)
+    columns = [column for column in ("symbol", "datetime", "open", "high", "low", "close", "volume", "amount", "turnover") if column in data.columns]
+    return data[columns]
+
+
+def normalize_adjustment_factors(frame: pd.DataFrame, symbol: str, adjust: str = "qfq") -> pd.DataFrame:
+    factor_column = f"{adjust or 'qfq'}_factor"
+    rename_map = {
+        "date": "date",
+        "\u65e5\u671f": "date",
+        factor_column: "adjust_factor",
+        "factor": "adjust_factor",
+        "adjust_factor": "adjust_factor",
+    }
+    data = frame.rename(columns=rename_map).copy()
+    missing = [column for column in ("date", "adjust_factor") if column not in data.columns]
+    if missing:
+        raise ValueError(f"Provider returned missing adjustment factor columns: {missing}")
+    data["symbol"] = str(symbol).zfill(6)
+    data["date"] = pd.to_datetime(data["date"], errors="raise")
+    data["adjust_factor"] = pd.to_numeric(data["adjust_factor"], errors="raise")
+    data = data.sort_values("date").reset_index(drop=True)
+    if (data["adjust_factor"] <= 0).any():
+        raise ValueError("Provider returned non-positive adjustment factors")
+    return data[["symbol", "date", "adjust_factor"]]
 
 
 def _http_get_text(url: str, timeout: float = 10.0) -> str:
@@ -128,6 +218,64 @@ def _fetch_akshare(method_name: str, **kwargs: Any) -> pd.DataFrame:
 def _fetch_akshare_daily(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
     raw = _fetch_akshare("stock_zh_a_hist", symbol=symbol, period="daily", start_date=start, end_date=end, adjust=adjust)
     return normalize_daily_bars(raw, symbol)
+
+
+def _fetch_akshare_minute(symbol: str, start: str, end: str, period: str, adjust: str) -> pd.DataFrame:
+    raw = _fetch_akshare("stock_zh_a_hist_min_em", symbol=symbol, start_date=start, end_date=end, period=period, adjust=adjust)
+    return normalize_minute_bars(raw, symbol)
+
+
+def _fetch_tencent_minute(symbol: str, start: str, end: str, period: str, adjust: str) -> pd.DataFrame:
+    if adjust:
+        raise RuntimeError("Tencent minute endpoint only supports raw minute bars")
+    code = f"{_market_prefix(symbol)}{str(symbol).zfill(6)}"
+    period_key = f"m{period}"
+    url = f"https://ifzq.gtimg.cn/appstock/app/kline/mkline?{urlencode({'param': f'{code},{period_key},,320'})}"
+    try:
+        payload = json.loads(_http_get_text(url))
+    except (json.JSONDecodeError, URLError) as exc:
+        raise RuntimeError(f"Tencent minute endpoint failed for {symbol}") from exc
+    rows = (((payload.get("data") or {}).get(code) or {}).get(period_key) or []) if isinstance(payload, dict) else []
+    parsed_rows: list[dict[str, object]] = []
+    for row in rows:
+        values = list(row) if isinstance(row, (list, tuple)) else []
+        if len(values) < 6:
+            continue
+        parsed_rows.append(
+            {
+                "datetime": values[0],
+                "open": values[1],
+                "close": values[2],
+                "high": values[3],
+                "low": values[4],
+                "volume": values[5],
+            }
+        )
+    if not parsed_rows:
+        raise RuntimeError(f"Tencent minute endpoint returned no rows for {symbol}")
+    frame = pd.DataFrame(parsed_rows)
+    frame["datetime"] = pd.to_datetime(frame["datetime"], format="%Y%m%d%H%M", errors="coerce")
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+    frame = frame[(frame["datetime"] >= start_dt) & (frame["datetime"] <= end_dt)].reset_index(drop=True)
+    if frame.empty:
+        raise RuntimeError(f"Tencent minute endpoint has no rows in requested range for {symbol}")
+    return normalize_minute_bars(frame, symbol)
+
+
+def _fetch_akshare_adjustment_factors(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+    mode = "hfq" if adjust == "hfq" else "qfq"
+    raw = _fetch_akshare(
+        "stock_zh_a_daily",
+        symbol=f"{_market_prefix(symbol)}{str(symbol).zfill(6)}",
+        start_date=start,
+        end_date=end,
+        adjust=f"{mode}-factor",
+    )
+    frame = normalize_adjustment_factors(raw, symbol, mode)
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+    return frame[(frame["date"] >= start_dt) & (frame["date"] <= end_dt)].reset_index(drop=True)
 
 
 def _fetch_sina_daily(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
@@ -258,6 +406,27 @@ class AkShareDailyProvider:
         return _fetch_akshare_daily(symbol, start, end, adjust)
 
 
+class AkShareMinuteProvider:
+    name = "akshare-minute"
+
+    def fetch_minute(self, symbol: str, start: str, end: str, period: str = "1", adjust: str = "") -> pd.DataFrame:
+        return _fetch_akshare_minute(symbol, start, end, period, adjust)
+
+
+class TencentMinuteProvider:
+    name = "tencent-minute"
+
+    def fetch_minute(self, symbol: str, start: str, end: str, period: str = "1", adjust: str = "") -> pd.DataFrame:
+        return _fetch_tencent_minute(symbol, start, end, period, adjust)
+
+
+class AkShareAdjustmentFactorProvider:
+    name = "akshare-adjustment"
+
+    def fetch_adjustment_factors(self, symbol: str, start: str, end: str, adjust: str = "qfq") -> pd.DataFrame:
+        return _fetch_akshare_adjustment_factors(symbol, start, end, adjust)
+
+
 class SinaDailyProvider:
     name = "sina"
 
@@ -375,6 +544,21 @@ def provider_chain(source: str = "auto") -> list[DailyBarProvider]:
     return [providers[name] for name in _parse_chain(source)]
 
 
+def minute_provider_chain(source: str = "auto") -> list[MinuteBarProvider]:
+    providers = {
+        "akshare-minute": AkShareMinuteProvider(),
+        "tencent-minute": TencentMinuteProvider(),
+    }
+    normalized = (source or "auto").strip().lower()
+    if normalized in {"auto", ""}:
+        return [providers["akshare-minute"], providers["tencent-minute"]]
+    if normalized in {"akshare", "akshare-minute"}:
+        return [providers["akshare-minute"], providers["tencent-minute"]]
+    if normalized in {"tencent", "tencent-minute"}:
+        return [providers["tencent-minute"]]
+    raise ValueError(f"Unknown minute data source: {source}")
+
+
 def ordered_provider_chain(source: str = "auto", health_path: Path | None = None) -> list[DailyBarProvider]:
     chain = provider_chain(source)
     if health_path is None:
@@ -424,18 +608,25 @@ def fetch_with_fallback(
     retry_sleep: float = 0.5,
 ) -> ProviderResult:
     errors: list[str] = []
+    attempts_log: list[dict[str, str]] = []
     health_path = Path("data/provider_health.json")
     store = ProviderHealthStore(health_path)
     for provider in ordered_provider_chain(source, health_path=health_path):
         for attempt in range(1, max(attempts, 1) + 1):
             try:
                 frame = provider.fetch_daily(symbol=symbol, start=start, end=end, adjust=adjust)
+                _validate_daily_frame(frame, symbol)
                 if not frame.empty:
                     store.update(provider.name, ok=True)
-                    return ProviderResult(provider=provider.name, frame=frame)
-                errors.append(f"{provider.name} attempt {attempt}: empty result")
+                    attempts_log.append({"provider": provider.name, "attempt": str(attempt), "status": "success", "message": f"{len(frame)} rows"})
+                    return ProviderResult(provider=provider.name, frame=frame, attempts=attempts_log)
+                message = "empty result"
+                errors.append(f"{provider.name} attempt {attempt}: {message}")
+                attempts_log.append({"provider": provider.name, "attempt": str(attempt), "status": "empty", "message": message})
+                store.update(provider.name, ok=False, error=message)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{provider.name} attempt {attempt}: {exc}")
+                attempts_log.append({"provider": provider.name, "attempt": str(attempt), "status": "failed", "message": str(exc)})
                 store.update(provider.name, ok=False, error=str(exc))
             if attempt < attempts:
                 sleep(retry_sleep)
@@ -444,6 +635,7 @@ def fetch_with_fallback(
 
 def fetch_table_with_fallback(source: str = "auto", **kwargs: Any) -> ProviderResult:
     errors: list[str] = []
+    attempts_log: list[dict[str, str]] = []
     health_path = Path("data/provider_health.json")
     store = ProviderHealthStore(health_path)
     for provider in ordered_table_provider_chain(source, health_path=health_path):
@@ -451,9 +643,92 @@ def fetch_table_with_fallback(source: str = "auto", **kwargs: Any) -> ProviderRe
             frame = provider.fetch(**kwargs)
             if not frame.empty:
                 store.update(provider.name, ok=True)
-                return ProviderResult(provider=provider.name, frame=frame)
-            errors.append(f"{provider.name}: empty result")
+                attempts_log.append({"provider": provider.name, "attempt": "1", "status": "success", "message": f"{len(frame)} rows"})
+                return ProviderResult(provider=provider.name, frame=frame, attempts=attempts_log)
+            message = "empty result"
+            errors.append(f"{provider.name}: {message}")
+            attempts_log.append({"provider": provider.name, "attempt": "1", "status": "empty", "message": message})
+            store.update(provider.name, ok=False, error=message)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{provider.name}: {exc}")
+            attempts_log.append({"provider": provider.name, "attempt": "1", "status": "failed", "message": str(exc)})
             store.update(provider.name, ok=False, error=str(exc))
     raise RuntimeError(f"All table providers failed: {' | '.join(errors)}")
+
+
+def _validate_daily_frame(frame: pd.DataFrame, symbol: str) -> None:
+    if frame.empty:
+        return
+    required = ["date", "open", "high", "low", "close", "volume", "symbol"]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ValueError(f"Provider returned missing normalized columns: {missing}")
+    symbols = set(frame["symbol"].astype(str).str.zfill(6).unique())
+    expected = str(symbol).zfill(6)
+    if symbols != {expected}:
+        raise ValueError(f"Provider returned symbol mismatch for {expected}: {sorted(symbols)}")
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    if dates.isna().any():
+        raise ValueError("Provider returned invalid dates")
+    numeric = frame[["open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+    if numeric.isna().any().any():
+        raise ValueError("Provider returned non-numeric OHLCV fields")
+    bad = numeric[
+        (numeric["open"] <= 0)
+        | (numeric["high"] <= 0)
+        | (numeric["low"] <= 0)
+        | (numeric["close"] <= 0)
+        | (numeric["high"] < numeric["low"])
+        | (numeric["high"] < numeric[["open", "close"]].max(axis=1))
+        | (numeric["low"] > numeric[["open", "close"]].min(axis=1))
+        | (numeric["volume"] < 0)
+    ]
+    if not bad.empty:
+        raise ValueError(f"Provider returned {len(bad)} invalid OHLCV rows")
+
+
+def _drop_daily_placeholder_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    numeric = frame[["open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+    placeholder = (
+        (numeric["open"] == 0)
+        & (numeric["high"] == 0)
+        & (numeric["low"] == 0)
+        & (numeric["volume"] == 0)
+        & (numeric["close"] > 0)
+    )
+    if not placeholder.any():
+        return frame
+    return frame.loc[~placeholder].copy()
+
+
+def _validate_minute_frame(frame: pd.DataFrame, symbol: str) -> None:
+    if frame.empty:
+        return
+    required = ["datetime", "open", "high", "low", "close", "volume", "symbol"]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ValueError(f"Provider returned missing normalized minute columns: {missing}")
+    symbols = set(frame["symbol"].astype(str).str.zfill(6).unique())
+    expected = str(symbol).zfill(6)
+    if symbols != {expected}:
+        raise ValueError(f"Provider returned minute symbol mismatch for {expected}: {sorted(symbols)}")
+    datetimes = pd.to_datetime(frame["datetime"], errors="coerce")
+    if datetimes.isna().any():
+        raise ValueError("Provider returned invalid minute datetimes")
+    numeric = frame[["open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+    if numeric.isna().any().any():
+        raise ValueError("Provider returned non-numeric minute OHLCV fields")
+    bad = numeric[
+        (numeric["open"] <= 0)
+        | (numeric["high"] <= 0)
+        | (numeric["low"] <= 0)
+        | (numeric["close"] <= 0)
+        | (numeric["high"] < numeric["low"])
+        | (numeric["high"] < numeric[["open", "close"]].max(axis=1))
+        | (numeric["low"] > numeric[["open", "close"]].min(axis=1))
+        | (numeric["volume"] < 0)
+    ]
+    if not bad.empty:
+        raise ValueError(f"Provider returned {len(bad)} invalid minute OHLCV rows")

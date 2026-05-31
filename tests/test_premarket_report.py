@@ -33,6 +33,17 @@ def test_premarket_report_renders_execution_first_sections():
             constraint_summary={"total": 0, "records": []},
             strategy_rotation=[{"strategy": "strong_stock_screen", "rotation_score": 70, "priority": "观察", "action": "只做确认单", "reasons": []}],
             rotation_history={"snapshot_count": 0, "strategies": []},
+            final_battle_plan={
+                "status": "warn",
+                "decision": "只允许计划内确认单",
+                "market_regime": "warm",
+                "market_stance": "适度进攻",
+                "target_exposure_pct": 0.3,
+                "allocated_pct": 0.1,
+                "must_do": [{"priority": "P1", "text": "确认价格不过度偏离"}],
+                "buy_candidates": [],
+                "blocked_candidates": [],
+            },
         )
     )
 
@@ -40,6 +51,8 @@ def test_premarket_report_renders_execution_first_sections():
     assert "只允许计划内确认单" in content
     assert "数据与市场" in content
     assert "策略与仓位" in content
+    assert "最终作战单" in content
+    assert "最终门禁：warn" in content
     assert "候选与预检" in content
     assert "Lot Lifecycle" in content
     assert "000001 平安银行" in content
@@ -51,6 +64,17 @@ def test_premarket_decision_blocks_on_any_blocking_precheck():
         {"regime": "warm"},
         [{"symbol": "000001", "status": "block"}],
         {"status": "pass"},
+    )
+
+    assert "禁止新开仓" in decision
+
+
+def test_premarket_decision_blocks_on_strategy_allocation_gate():
+    decision = premarket_decision(
+        {"regime": "warm"},
+        [{"symbol": "000001", "status": "pass"}],
+        {"status": "pass"},
+        {"strategy_action": "pause", "strategy_alert_level": "block"},
     )
 
     assert "禁止新开仓" in decision

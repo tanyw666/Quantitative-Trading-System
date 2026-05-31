@@ -1,0 +1,22 @@
+name: steady_reversal_sharpe
+description: 类夏普动量约束 + 低换手低振幅反转精选，20日调仓，默认持股5只
+strategy: steady_reversal_sharpe
+params:
+  min_like_sharpe: 1.0
+  holding_count: 5
+  rebalance_period: 20
+  min_traded_value: 20000000
+  max_atr_pct: 0.20
+  require_value_pass: true
+  require_turnover: true
+scoring_weights:
+  like_sharpe_10: 0.30
+  steady_reversal_score: 0.35
+  turnover_60_avg: 0.15
+  amplitude_10_avg: 0.15
+  atr_pct_14: 0.05
+constraint_policy:
+  window_days: 7
+  single_block_pause: 2
+  recover_after_clean_days: 3
+  warn_exposure_multiplier: 0.50

@@ -40,6 +40,24 @@ def summarize_rotation_history(snapshots: list[dict[str, Any]]) -> dict[str, Any
         scores = [float(row.get("rotation_score", 0) or 0) for row in rows]
         priorities = [str(row.get("priority", "") or "") for row in rows]
         match_rates = [float(row.get("trade_plan_match_rate")) for row in rows if row.get("trade_plan_match_rate") not in (None, "")]
+        lifecycle_scores = [
+            float((row.get("lifecycle_pressure") or {}).get("score"))
+            for row in rows
+            if isinstance(row.get("lifecycle_pressure"), dict)
+            and (row.get("lifecycle_pressure") or {}).get("score") not in (None, "")
+        ]
+        lifecycle_blocks = sum(
+            1
+            for row in rows
+            if isinstance(row.get("lifecycle_pressure"), dict)
+            and str((row.get("lifecycle_pressure") or {}).get("alert_level", "") or "") == "block"
+        )
+        doctor_warns = sum(
+            1
+            for row in rows
+            if isinstance(row.get("lifecycle_pressure"), dict)
+            and str((row.get("lifecycle_pressure") or {}).get("doctor_status", "") or "") in {"warn", "fail"}
+        )
         strategies.append(
             {
                 "strategy": strategy,
@@ -54,6 +72,9 @@ def summarize_rotation_history(snapshots: list[dict[str, Any]]) -> dict[str, Any
                 "latest_action": rows[-1].get("action", "") if rows else "",
                 "avg_trade_plan_match_rate": round(sum(match_rates) / len(match_rates), 3) if match_rates else None,
                 "low_trade_plan_match_count": sum(1 for rate in match_rates if rate < 0.85),
+                "avg_lifecycle_score": round(sum(lifecycle_scores) / len(lifecycle_scores), 2) if lifecycle_scores else None,
+                "lifecycle_block_count": lifecycle_blocks,
+                "doctor_warn_count": doctor_warns,
             }
         )
 
@@ -134,6 +155,15 @@ def render_rotation_history_card_lines(summary: dict[str, Any] | None, limit: in
         )[:limit]
         if low_match:
             lines.append(f"- 计划失配偏多：{_strategy_list(low_match, count_key='low_trade_plan_match_count')}")
+        lifecycle_hotspots = sorted(
+            [item for item in strategies if int(item.get("lifecycle_block_count", 0) or 0)],
+            key=lambda item: (
+                -int(item.get("lifecycle_block_count", 0) or 0),
+                str(item.get("strategy", "")),
+            ),
+        )[:limit]
+        if lifecycle_hotspots:
+            lines.append(f"- Lifecycle pressure hotspots: {_strategy_list(lifecycle_hotspots, count_key='lifecycle_block_count')}")
     return lines
 
 

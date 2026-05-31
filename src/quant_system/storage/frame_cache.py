@@ -16,6 +16,8 @@ def _normalize_for_disk(frame: pd.DataFrame) -> pd.DataFrame:
     data = frame.copy()
     if "date" in data.columns:
         data["date"] = pd.to_datetime(data["date"]).dt.strftime("%Y-%m-%d")
+    if "datetime" in data.columns:
+        data["datetime"] = pd.to_datetime(data["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
     if "symbol" in data.columns:
         data["symbol"] = data["symbol"].astype(str).str.strip().str.zfill(6)
     return data
@@ -52,6 +54,8 @@ def read_frame_cache(path_without_suffix: Path) -> pd.DataFrame:
 
     if "date" in data.columns:
         data["date"] = pd.to_datetime(data["date"])
+    if "datetime" in data.columns:
+        data["datetime"] = pd.to_datetime(data["datetime"])
     if "symbol" in data.columns:
         data["symbol"] = data["symbol"].astype(str).str.strip().str.zfill(6)
     return data

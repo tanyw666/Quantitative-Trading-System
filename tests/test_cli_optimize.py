@@ -164,6 +164,96 @@ def test_optimize_health_cli_applies_constraint_policy(tmp_path, capsys):
     assert '"constraint_policy"' in output
 
 
+def test_optimize_health_cli_uses_lifecycle_history_and_doctor_memory(tmp_path, capsys):
+    sqlite_path = tmp_path / "quant.sqlite"
+    store = SQLiteStore(sqlite_path)
+    store.insert_selections(
+        [
+            {
+                "date": "2026-05-29",
+                "strategy": "dragon",
+                "symbol": "000001",
+                "name": "Demo",
+                "close": 10,
+                "reason": "test",
+            }
+        ]
+    )
+    store.insert_trade(
+        {
+            "date": "2026-05-30",
+            "strategy": "dragon",
+            "symbol": "000001",
+            "side": "BUY",
+            "price": 10,
+            "quantity": 100,
+            "amount": 1000,
+        }
+    )
+    store.insert_position_action_plan(
+        {
+            "created_at": "2026-05-28T09:00:00+00:00",
+            "action_date": "2026-05-28",
+            "status": "warn",
+            "reduce_count": 1,
+            "actions": [],
+        }
+    )
+    store.insert_exit_plan(
+        {
+            "created_at": "2026-05-29T10:00:00+00:00",
+            "plan_date": "2026-05-29",
+            "status": "warn",
+            "sell_all_count": 1,
+            "items": [],
+        }
+    )
+    store.insert_lifecycle_snapshot(
+        {
+            "created_at": "2026-05-28T12:00:00+00:00",
+            "snapshot_date": "2026-05-28",
+            "status": "block",
+            "execution": {
+                "trade_plan_match_rate": 0.6,
+                "action_execution_rate": 0.5,
+                "exit_execution_rate": 0.0,
+                "lot_exit_execution_rate": 0.0,
+                "action_missed_count": 1,
+                "exit_missed_count": 1,
+                "lot_exit_missed_count": 1,
+            },
+            "exit_plan": {"sell_all_count": 1},
+        }
+    )
+    store.insert_lifecycle_snapshot(
+        {
+            "created_at": "2026-05-29T12:00:00+00:00",
+            "snapshot_date": "2026-05-29",
+            "status": "block",
+            "execution": {
+                "trade_plan_match_rate": 0.5,
+                "action_execution_rate": 0.0,
+                "exit_execution_rate": 0.0,
+                "lot_exit_execution_rate": 0.0,
+                "action_missed_count": 1,
+                "exit_missed_count": 1,
+                "lot_exit_missed_count": 1,
+            },
+            "exit_plan": {"sell_all_count": 1},
+        }
+    )
+    args = Namespace(sqlite=sqlite_path, settings=None)
+
+    cli.run_optimize_health(args)
+
+    output = capsys.readouterr().out
+    assert '"strategy": "dragon"' in output
+    assert '"action": "pause"' in output
+    assert '"doctor_status": "warn"' in output
+    assert '"block_count": 2' in output
+    assert '"status_trend": "worsening"' in output
+
+
 def test_optimize_validate_strategy_cli_accepts_trade_plan_log(tmp_path, capsys):
     config = tmp_path / "strategy.yaml"
     config.write_text(
@@ -691,6 +781,73 @@ def test_optimize_rotation_cli_carries_trade_plan_signals_into_snapshot(tmp_path
     snapshot_files = list(snapshot_dir.glob("rotation_*.json"))
     assert snapshot_files
     assert '"trade_plan_match_rate"' in output or '"trade_plan_match_rate"' in snapshot_files[0].read_text(encoding="utf-8")
+
+
+def test_optimize_rotation_cli_inherits_review_memory_pressure(tmp_path, capsys):
+    sqlite_path = tmp_path / "quant.sqlite"
+    store = SQLiteStore(sqlite_path)
+    store.insert_selections(
+        [{"date": "2026-05-29", "strategy": "dragon", "symbol": "000001", "close": 10, "reason": "test"}]
+    )
+    store.insert_trade(
+        {
+            "date": "2026-05-30",
+            "strategy": "dragon",
+            "symbol": "000001",
+            "side": "BUY",
+            "amount": 1000,
+        }
+    )
+    store.insert_position_action_plan(
+        {
+            "created_at": "2026-05-29T10:00:00+00:00",
+            "action_date": "2026-05-29",
+            "status": "warn",
+            "reduce_count": 1,
+            "actions": [],
+        }
+    )
+    store.insert_exit_plan(
+        {
+            "created_at": "2026-05-29T11:00:00+00:00",
+            "plan_date": "2026-05-29",
+            "status": "warn",
+            "sell_all_count": 1,
+            "items": [],
+        }
+    )
+    for day in ("2026-05-28", "2026-05-29"):
+        store.insert_lifecycle_snapshot(
+            {
+                "created_at": f"{day}T12:00:00+00:00",
+                "snapshot_date": day,
+                "status": "block",
+                "execution": {
+                    "trade_plan_match_rate": 0.5,
+                    "action_execution_rate": 0.0,
+                    "exit_execution_rate": 0.0,
+                    "lot_exit_execution_rate": 0.0,
+                    "action_missed_count": 1,
+                    "exit_missed_count": 1,
+                    "lot_exit_missed_count": 1,
+                },
+                "exit_plan": {"sell_all_count": 1},
+            }
+        )
+    args = Namespace(
+        sqlite=sqlite_path,
+        settings=None,
+        promotion_log=tmp_path / "unused_promotions.jsonl",
+        constraint_log=tmp_path / "unused_constraints.jsonl",
+        limit=5,
+        format="json",
+    )
+
+    cli.run_optimize_rotation(args)
+
+    output = capsys.readouterr().out
+    assert '"strategy": "dragon"' in output
+    assert '"priority": "暂停"' in output
 
 
 def test_optimize_validate_strategy_cli_accepts_trade_plan_log(tmp_path, capsys):

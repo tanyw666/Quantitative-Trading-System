@@ -31,7 +31,7 @@ def test_daily_report_embeds_gate_review():
     )
 
     assert "Gate Discipline" in content
-    assert "BUY violation rate" in content
+    assert "买入违规率" in content
     assert "Discipline Advice" in content
     assert "Discipline Adherence" in content
 
@@ -71,7 +71,7 @@ def test_briefing_report_embeds_gate_review():
     )
 
     assert "Gate Discipline" in content
-    assert "Warn/block BUY count" in content
+    assert "预警/阻断买入数" in content
     assert "Discipline Advice" in content
     assert "Discipline Adherence" in content
 
@@ -95,6 +95,6 @@ def test_premarket_report_embeds_gate_review():
     )
 
     assert "Gate Discipline" in content
-    assert "BUY violation rate" in content
+    assert "买入违规率" in content
     assert "Discipline Advice" in content
     assert "Discipline Adherence" in content

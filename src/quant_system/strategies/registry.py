@@ -5,6 +5,7 @@ from typing import Any
 
 from quant_system.strategies.strong_stock_screen import StrongStockScreen
 from quant_system.strategies.trend_breakout import TrendBreakoutStrategy
+from quant_system.strategies.steady_reversal_sharpe import SteadyReversalSharpeStrategy
 from quant_system.strategies.configurable import ConfigurableScreenStrategy
 from quant_system.strategies.dragon_leader import DragonLeaderStrategy
 
@@ -15,6 +16,8 @@ def create_strategy(name: str, **kwargs):
         return TrendBreakoutStrategy(**kwargs)
     if normalized == "strong_stock_screen":
         return StrongStockScreen(**kwargs)
+    if normalized == "steady_reversal_sharpe":
+        return SteadyReversalSharpeStrategy(**kwargs)
     if normalized == "dragon_leader":
         return DragonLeaderStrategy(**kwargs)
     raise ValueError(f"Unknown strategy: {name}")

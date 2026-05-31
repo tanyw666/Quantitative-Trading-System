@@ -3,6 +3,22 @@ base_currency: CNY
 data:
   primary_source: csv
   cache_dir: data/cache
+trading_day:
+  phases:
+    premarket:
+      extra_checklist:
+        - 确认最终作战单已经生成并留档
+        - 确认交易计划批次已经生成，必要时用 --record-trade-plans 留档
+    intraday:
+      extra_checklist:
+        - 下单前已运行 portfolio confirm 或 portfolio approve
+    post_trade:
+      extra_checklist:
+        - 成交后已通过 review trade-add 回写交易日志
+        - 复盘前已运行 review doctor 检查账本完整性
+    lifecycle:
+      extra_checklist:
+        - 收盘后确认生命周期快照、执行审计和归因策略已经更新
 backtest:
   initial_cash: 100000
   commission_rate: 0.0003
@@ -13,10 +29,24 @@ reports:
   output_dir: reports
 scoring:
   weights:
-    momentum_20: 0.50
-    volume_ratio_20: 0.30
-    atr_pct_14: 0.20
-    sector_strength_score: 0.15
+    momentum_20: 0.35
+    volume_ratio_20: 0.18
+    atr_pct_14: 0.12
+    sector_strength_score: 0.10
+    ma20_slope_5: 0.12
+    close_to_ma20: 0.05
+    traded_value: 0.05
+    rsi_14: 0.03
+    trend_quality_score: 0.05
+    entry_structure_score: 0.08
+    chase_risk_score: 0.05
+    candle_warning_count: 0.02
+    tape_pressure_score: 0.04
+    tape_distribution_warning: 0.03
+    volume_confirmation_score: 0.03
+    candle_quality_score: 0.03
+    breakout_quality_score: 0.04
+    false_breakout_pressure: 0.03
 risk:
   regime_exposure:
     hot: 0.80
@@ -36,6 +66,11 @@ risk:
     single_block_pause: 1
     warn_escalation_count: 2
     recover_after_clean_days: 3
+    recover_probe_days: 2
+    recover_probe_exposure_multiplier: 0.25
+    recover_trade_plan_match_rate_min: 0.90
+    recover_max_unmatched_plans: 0
+    recover_max_orphan_trades: 0
     warn_exposure_multiplier: 0.50
     strategies:
       dragon_leader:
@@ -43,9 +78,13 @@ risk:
         single_block_pause: 1
         cooldown_block_count: 2
         recover_after_clean_days: 4
+        recover_probe_days: 2
+        recover_probe_exposure_multiplier: 0.20
         warn_exposure_multiplier: 0.30
       strong_stock_screen:
         window_days: 7
         single_block_pause: 2
         recover_after_clean_days: 3
+        recover_probe_days: 2
+        recover_probe_exposure_multiplier: 0.25
         warn_exposure_multiplier: 0.50

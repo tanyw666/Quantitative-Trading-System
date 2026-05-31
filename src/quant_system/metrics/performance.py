@@ -111,6 +111,8 @@ def realized_trade_pnls(trades: list) -> list[float]:
                     buy.quantity - matched,
                     buy.fee * remaining_ratio,
                     buy.reason,
+                    buy.signal_date,
+                    buy.price_field,
                 )
 
     return pnls

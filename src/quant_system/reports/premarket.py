@@ -19,6 +19,8 @@ from quant_system.reports.pretrade import render_precheck_summary_lines
 from quant_system.reports.rotation_history import render_rotation_history_card_lines
 from quant_system.reports.strategy_health import render_strategy_health_lines
 from quant_system.reports.strategy_rotation import render_strategy_rotation_lines
+from quant_system.reports.strategy_portfolio import render_strategy_portfolio_lines
+from quant_system.reports.final_battle_plan import render_final_battle_plan_lines
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class PremarketReportInput:
     strategy_health: list[dict] | None = None
     constraint_summary: dict | None = None
     strategy_rotation: list[dict] | None = None
+    strategy_portfolio: dict | None = None
     rotation_history: dict | None = None
     gate_review: dict | None = None
     trade_stats: dict | None = None
@@ -47,6 +50,7 @@ class PremarketReportInput:
     lifecycle_snapshot: dict | None = None
     discipline_summary: dict | None = None
     discipline_adherence: dict | None = None
+    final_battle_plan: dict | None = None
 
 
 class PremarketReport:
@@ -58,7 +62,7 @@ class PremarketReport:
             "",
             "## 0. 开盘前结论",
             "",
-            f"- 结论：{premarket_decision(data.market_temperature, data.pretrade_checks, data.holding_risk)}",
+            f"- 结论：{premarket_decision(data.market_temperature, data.pretrade_checks, data.holding_risk, data.allocation_plan)}",
             f"- 市场状态：{data.market_temperature.get('regime', '')}，{data.market_temperature.get('stance', '')}",
             f"- 持仓风险：{(data.holding_risk or {}).get('status', 'pass')}",
         ]
@@ -72,6 +76,9 @@ class PremarketReport:
                 exit_plan=data.exit_plan,
             )
         )
+
+        lines.extend(["", "### 最终作战单", ""])
+        lines.extend(render_final_battle_plan_lines(data.final_battle_plan))
 
         lines.extend(["", "## 1. 数据与市场", ""])
         if data.data_health:
@@ -89,6 +96,8 @@ class PremarketReport:
         lines.extend(render_constraint_summary_lines(data.constraint_summary))
         lines.extend(["", "### 策略轮换", ""])
         lines.extend(render_strategy_rotation_lines(data.strategy_rotation))
+        lines.extend(["", "### 策略组合管理器", ""])
+        lines.extend(render_strategy_portfolio_lines(data.strategy_portfolio))
         lines.extend(["", "### 轮换历史", ""])
         lines.extend(render_rotation_history_card_lines(data.rotation_history))
         lines.extend(["", "### 仓位计划", ""])
@@ -151,13 +160,16 @@ def premarket_decision(
     market_temperature: dict | None,
     pretrade_checks: list[dict] | None,
     holding_risk: dict | None,
+    allocation_plan: dict | None = None,
 ) -> str:
     risk_status = str((holding_risk or {}).get("status", "pass") or "pass")
     regime = str((market_temperature or {}).get("regime", "") or "")
     statuses = {str(item.get("status", "") or "") for item in (pretrade_checks or [])}
-    if risk_status == "block" or "block" in statuses or regime in {"frozen", "empty"}:
+    strategy_action = str((allocation_plan or {}).get("strategy_action", "") or "")
+    strategy_alert = str((allocation_plan or {}).get("strategy_alert_level", "pass") or "pass")
+    if risk_status == "block" or "block" in statuses or regime in {"frozen", "empty"} or strategy_action == "pause" or strategy_alert == "block":
         return "禁止新开仓，先处理阻断项。"
-    if risk_status == "warn" or "warn" in statuses or regime == "cold":
+    if risk_status == "warn" or "warn" in statuses or regime == "cold" or strategy_action == "reduce" or strategy_alert == "warn":
         return "只允许计划内确认单，禁止追高加仓。"
     return "可按计划执行，但所有买入必须先完成正式 precheck。"
 

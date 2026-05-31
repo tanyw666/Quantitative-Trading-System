@@ -144,3 +144,31 @@ def test_discipline_adherence_flags_unexplained_exception():
 
     assert summary["block_count"] == 1
     assert summary["by_violation"]["unexplained_discipline_exception"] == 1
+
+
+def test_discipline_adherence_flags_buy_during_structure_cooldown():
+    summary = evaluate_discipline_adherence(
+        [
+            {
+                "date": "2026-05-29",
+                "source": "report.daily",
+                "status": "block",
+                "structure_violation_count": 2,
+                "advice": ["Structure rule: 2 BUY records hit structure-gate warnings; next session blocks chase/false-breakout entries until a clean pretrade is regenerated."],
+            }
+        ],
+        [
+            {
+                "date": "2026-05-30",
+                "symbol": "000006",
+                "side": "BUY",
+                "amount": 6000,
+                "gate_status": "pass",
+                "workflow_summary": "reports/workflow.json",
+            }
+        ],
+        limit=10,
+    )
+
+    assert summary["block_count"] == 1
+    assert summary["by_violation"]["structure_cooldown_buy"] == 1

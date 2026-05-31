@@ -3,8 +3,32 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_system.config.settings import DEFAULT_SCORING_WEIGHTS
+from quant_system.screening.value_filters import add_value_filter_fields
 
-SUPPORTED_SCORE_COLUMNS = ("momentum_20", "volume_ratio_20", "atr_pct_14", "sector_strength_score")
+SUPPORTED_SCORE_COLUMNS = (
+    "momentum_20",
+    "volume_ratio_20",
+    "atr_pct_14",
+    "sector_strength_score",
+    "ma20_slope_5",
+    "close_to_ma20",
+    "traded_value",
+    "rsi_14",
+    "trend_quality_score",
+    "entry_structure_score",
+    "chase_risk_score",
+    "candle_warning_count",
+    "tape_pressure_score",
+    "tape_distribution_warning",
+    "volume_confirmation_score",
+    "candle_quality_score",
+    "breakout_quality_score",
+    "false_breakout_pressure",
+    "like_sharpe_10",
+    "steady_reversal_score",
+    "turnover_60_avg",
+    "amplitude_10_avg",
+)
 
 
 def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = None) -> pd.DataFrame:
@@ -12,7 +36,7 @@ def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = Non
         return frame.copy()
 
     weights = weights or DEFAULT_SCORING_WEIGHTS
-    scored = frame.copy()
+    scored = add_value_filter_fields(frame)
     scored["score"] = 0.0
 
     rules: list[tuple[str, float, bool]] = [
@@ -20,6 +44,24 @@ def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = Non
         (SUPPORTED_SCORE_COLUMNS[1], float(weights.get("volume_ratio_20", 0.30)), True),
         (SUPPORTED_SCORE_COLUMNS[2], float(weights.get("atr_pct_14", 0.20)), False),
         (SUPPORTED_SCORE_COLUMNS[3], float(weights.get("sector_strength_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[4], float(weights.get("ma20_slope_5", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[5], float(weights.get("close_to_ma20", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[6], float(weights.get("traded_value", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[7], float(weights.get("rsi_14", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[8], float(weights.get("trend_quality_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[9], float(weights.get("entry_structure_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[10], float(weights.get("chase_risk_score", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[11], float(weights.get("candle_warning_count", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[12], float(weights.get("tape_pressure_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[13], float(weights.get("tape_distribution_warning", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[14], float(weights.get("volume_confirmation_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[15], float(weights.get("candle_quality_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[16], float(weights.get("breakout_quality_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[17], float(weights.get("false_breakout_pressure", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[18], float(weights.get("like_sharpe_10", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[19], float(weights.get("steady_reversal_score", 0.0)), True),
+        (SUPPORTED_SCORE_COLUMNS[20], float(weights.get("turnover_60_avg", 0.0)), False),
+        (SUPPORTED_SCORE_COLUMNS[21], float(weights.get("amplitude_10_avg", 0.0)), False),
     ]
 
     used_weight = 0.0
@@ -52,6 +94,9 @@ def score_candidates(frame: pd.DataFrame, weights: dict[str, float] | None = Non
         ascending.append(False)
     if "sector_strength_score" in scored.columns:
         sort_columns.append("sector_strength_score")
+        ascending.append(False)
+    if "entry_structure_score" in scored.columns:
+        sort_columns.append("entry_structure_score")
         ascending.append(False)
     return scored.sort_values(sort_columns, ascending=ascending).reset_index(drop=True)
 

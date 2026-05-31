@@ -19,11 +19,11 @@ def test_render_gate_review_lines_highlights_gate_discipline():
     )
     content = "\n".join(lines)
 
-    assert "Gate records" in content
-    assert "Missing gate snapshots" in content
-    assert "BUY violation rate" in content
-    assert "Top reason" in content
-    assert "Action Items" in content
+    assert "门禁记录" in content
+    assert "缺失门禁快照" in content
+    assert "买入违规率" in content
+    assert "高频原因" in content
+    assert "行动项" in content
 
 
 def test_render_gate_review_markdown_renders_recent_records():
@@ -62,7 +62,7 @@ def test_render_gate_review_markdown_renders_recent_records():
         }
     )
 
-    assert "# Gate Review" in content
-    assert "Recent Gate Records" in content
-    assert "Warn/Block BUY Records" in content
+    assert "# 门禁审计" in content
+    assert "最近门禁记录" in content
+    assert "预警/阻断买入记录" in content
     assert "000001 Demo" in content

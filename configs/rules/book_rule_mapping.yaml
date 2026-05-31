@@ -1,0 +1,375 @@
+version: 1
+name: book_rule_mapping
+purpose: >
+  Convert the selected trading, value investing, tactical, and discipline books
+  into system-owned rules. This file is the source map for future screening,
+  entry, sizing, exit, and review logic.
+
+required_rule_fields:
+  - id
+  - layer
+  - source_books
+  - principle
+  - quant_rules
+  - manual_checks
+  - system_targets
+  - rollout_priority
+
+user_book_coverage:
+  日本蜡烛图技术:
+    canonical: Japanese Candlestick Charting Techniques
+    rule_ids:
+      - selection.volume_price_confirmation
+      - entry.confirmation_not_prediction
+      - exit.profit_without_regret
+  股票大作手回忆录:
+    canonical: Reminiscences of a Stock Operator
+    rule_ids:
+      - selection.trend_quality
+      - entry.confirmation_not_prediction
+      - sizing.probe_then_pyramid
+      - exit.stop_means_exit
+  证券分析:
+    canonical: Security Analysis
+    rule_ids:
+      - selection.value_landmine_filter
+  聪明的投资者:
+    canonical: The Intelligent Investor
+    rule_ids:
+      - selection.value_landmine_filter
+  巴菲特致股东信:
+    canonical: Berkshire Hathaway Letters to Shareholders
+    rule_ids:
+      - selection.value_landmine_filter
+      - sizing.market_offense_defense
+  量价分析:
+    canonical: Volume Price Analysis
+    rule_ids:
+      - selection.volume_price_confirmation
+      - entry.confirmation_not_prediction
+      - exit.profit_without_regret
+  解读盘口:
+    canonical: Tape Reading and Market Tactics
+    rule_ids:
+      - selection.volume_price_confirmation
+  专业投机原理:
+    canonical: Methods of a Wall Street Master
+    rule_ids:
+      - entry.no_chase_zone
+      - sizing.probe_then_pyramid
+      - exit.stop_means_exit
+  交易心理分析:
+    canonical: Trading in the Zone
+    rule_ids:
+      - entry.no_chase_zone
+      - exit.stop_means_exit
+      - discipline.exception_has_cost
+      - discipline.review_to_constraint
+  道德经:
+    canonical: Tao Te Ching
+    rule_ids:
+      - sizing.market_offense_defense
+      - discipline.review_to_constraint
+  孙子兵法:
+    canonical: The Art of War
+    rule_ids:
+      - selection.trend_quality
+      - sizing.probe_then_pyramid
+      - sizing.market_offense_defense
+      - exit.profit_without_regret
+  四书五经:
+    canonical: The Four Books and Five Classics
+    rule_ids:
+      - discipline.exception_has_cost
+  三十六计:
+    canonical: The Thirty-Six Stratagems
+    rule_ids:
+      - entry.no_chase_zone
+  羊皮卷:
+    canonical: The Greatest Salesman in the World
+    rule_ids:
+      - discipline.exception_has_cost
+  人性的弱点:
+    canonical: How to Win Friends and Influence People
+    rule_ids:
+      - discipline.exception_has_cost
+  诸子百家:
+    canonical: Hundred Schools of Thought
+    rule_ids:
+      - discipline.review_to_constraint
+  三国:
+    canonical: Romance of the Three Kingdoms
+    rule_ids:
+      - sizing.market_offense_defense
+
+layers:
+  selection:
+    mission: Decide which stocks deserve attention before any trade plan exists.
+    rules:
+      - id: selection.trend_quality
+        layer: selection
+        source_books:
+          - Reminiscences of a Stock Operator
+          - Methods of a Wall Street Master
+          - The Art of War
+        principle: Prefer stocks already aligned with the main trend; do not hunt weak structures only because they look cheap.
+        quant_rules:
+          - ma20_slope_5 >= 0
+          - close >= ma20
+          - momentum_20 >= strategy_min_momentum
+          - close_to_ma20 <= strategy_max_chase_gap
+        manual_checks:
+          - Is the stock part of the current market main line, not an isolated move?
+          - Is the move a campaign with follow-through, not a one-day impulse?
+        cognitive_reminders:
+          - Strength can continue longer than expected, but only if structure confirms.
+        system_targets:
+          - factors.technical
+          - screening.scoring
+          - strategies.strong_stock_screen
+          - strategies.trend_breakout
+        rollout_priority: P0
+
+      - id: selection.volume_price_confirmation
+        layer: selection
+        source_books:
+          - Volume Price Analysis
+          - Tape Reading and Market Tactics
+          - Japanese Candlestick Charting Techniques
+        principle: Price progress must be supported by volume and candle quality; unsupported breakouts are suspect.
+        quant_rules:
+          - volume_ratio_20 between 1.2 and 5.0 for normal confirmation
+          - close_position_in_range >= 0.55 for constructive closes
+          - upper_shadow_pct <= 0.35 unless volume contraction shows supply drying
+          - false_breakout_flag == false
+        manual_checks:
+          - Did volume expand on the breakout and contract on the pullback?
+          - Was there visible distribution near the high?
+        cognitive_reminders:
+          - Big volume is not automatically bullish; read it with close location.
+        system_targets:
+          - factors.technical
+          - screening.scoring
+          - risk.pretrade
+        rollout_priority: P0
+
+      - id: selection.value_landmine_filter
+        layer: selection
+        source_books:
+          - Security Analysis
+          - The Intelligent Investor
+          - Berkshire Hathaway Letters to Shareholders
+        principle: Short-term strength should still avoid obvious business, balance-sheet, and valuation landmines.
+        quant_rules:
+          - reject if st_flag == true
+          - reject if delisting_risk_flag == true
+          - warn if pe_ttm <= 0 or pb <= 0
+          - warn if market_cap is missing for non-microcap strategies
+        manual_checks:
+          - Is there a known fraud, refinancing, pledge, or governance risk?
+          - Is the valuation extreme without a matching catalyst?
+        cognitive_reminders:
+          - A trading system does not need deep valuation on every trade, but it must avoid obvious ruin risks.
+        system_targets:
+          - data.providers
+          - screening.scoring
+          - risk.pretrade
+        rollout_priority: P1
+
+  entry:
+    mission: Decide when a candidate is allowed to become an order.
+    rules:
+      - id: entry.confirmation_not_prediction
+        layer: entry
+        source_books:
+          - Reminiscences of a Stock Operator
+          - Japanese Candlestick Charting Techniques
+          - Volume Price Analysis
+        principle: Enter after confirmation; do not buy only because the story feels right.
+        quant_rules:
+          - entry_price <= close * 1.03
+          - entry_structure_score >= 60
+          - volume_price_state in [confirmed, quiet_pullback, constructive_breakout]
+          - candle_warning_count == 0 for full size
+        manual_checks:
+          - What exactly confirmed the trade today?
+          - If the entry fails, where is the invalidation price?
+        cognitive_reminders:
+          - Waiting for confirmation is not missing out; it is buying information.
+        system_targets:
+          - risk.pretrade
+          - portfolio.trade_plan
+          - reports.final_battle_plan
+        rollout_priority: P0
+
+      - id: entry.no_chase_zone
+        layer: entry
+        source_books:
+          - Trading in the Zone
+          - Methods of a Wall Street Master
+          - The Thirty-Six Stratagems
+        principle: Do not turn a valid setup into a bad trade by paying too far above the plan.
+        quant_rules:
+          - warn if entry_price > close * 1.03
+          - block if entry_price > close * 1.06 unless explicit exception is recorded
+          - warn if rsi_14 >= 85
+          - warn if close_to_ma20 >= 0.25
+        manual_checks:
+          - Am I buying because the plan triggered, or because price is moving away from me?
+          - Is this an ambush entry or a panic entry?
+        cognitive_reminders:
+          - Price can be right and still be the wrong entry.
+        system_targets:
+          - risk.pretrade
+          - risk.execution_confirm
+          - portfolio.order_approval
+        rollout_priority: P0
+
+  sizing:
+    mission: Decide how much risk is allowed after the setup passes.
+    rules:
+      - id: sizing.probe_then_pyramid
+        layer: sizing
+        source_books:
+          - Reminiscences of a Stock Operator
+          - Methods of a Wall Street Master
+          - The Art of War
+        principle: Start with a probe; add only after the position proves right.
+        quant_rules:
+          - initial_probe_pct <= max_probe_pct
+          - add_allowed only if unrealized_return >= add_profit_trigger_pct
+          - block add if price <= stop_price * (1 + near_stop_pct)
+          - block add if discipline_exception_count >= exception_block_threshold
+        manual_checks:
+          - Is this add supported by profit and structure, or by hope?
+          - Would I still open a fresh trade here?
+        cognitive_reminders:
+          - Never average down a loser; add to strength, not to pain.
+        system_targets:
+          - portfolio.lifecycle_rules
+          - risk.sizing
+          - reports.trading_cockpit
+        rollout_priority: P0
+
+      - id: sizing.market_offense_defense
+        layer: sizing
+        source_books:
+          - The Art of War
+          - Tao Te Ching
+          - Berkshire Hathaway Letters to Shareholders
+          - Romance of the Three Kingdoms
+        principle: Size follows environment; attack only when conditions support attack.
+        quant_rules:
+          - hot regime target_exposure_pct <= 0.80
+          - warm regime target_exposure_pct <= 0.60
+          - cold regime target_exposure_pct <= 0.10
+          - frozen regime target_exposure_pct == 0
+        manual_checks:
+          - Is the market rewarding offense or punishing it?
+          - Is cash currently a position?
+        cognitive_reminders:
+          - The best attack in a bad field is often not to attack.
+        system_targets:
+          - market.temperature
+          - risk.sizing
+          - reports.final_battle_plan
+        rollout_priority: P0
+
+  exit:
+    mission: Decide when risk must be reduced, realized, or left alone.
+    rules:
+      - id: exit.stop_means_exit
+        layer: exit
+        source_books:
+          - Reminiscences of a Stock Operator
+          - Trading in the Zone
+          - Methods of a Wall Street Master
+        principle: A stop is an invalidation point, not a negotiation point.
+        quant_rules:
+          - sell_all if market_price <= stop_price
+          - block new BUY while sell_all_count > 0
+          - record missed_exit if no matching SELL within lookahead_days
+        manual_checks:
+          - Has the original thesis changed, or am I avoiding the loss?
+          - Was the stop placed at a structural level or at an emotional comfort level?
+        cognitive_reminders:
+          - Discipline is measured at the exit, not at the plan.
+        system_targets:
+          - portfolio.exit_plan
+          - portfolio.lifecycle_rules
+          - portfolio.approval_execution
+        rollout_priority: P0
+
+      - id: exit.profit_without_regret
+        layer: exit
+        source_books:
+          - Japanese Candlestick Charting Techniques
+          - Volume Price Analysis
+          - The Art of War
+        principle: Take profit when supply appears or target is reached, but do not sell a healthy trend only from fear.
+        quant_rules:
+          - partial_take_profit if market_price >= target_price
+          - warn if upper_shadow_pct >= 0.45 and volume_ratio_20 >= 2.0
+          - hold if trend_quality_score remains high and no exit trigger fires
+        manual_checks:
+          - Is this distribution, or only normal volatility?
+          - Am I selling because structure changed, or because floating profit makes me anxious?
+        cognitive_reminders:
+          - Profit protection and fear selling are different actions.
+        system_targets:
+          - portfolio.exit_plan
+          - reports.position_lifecycle
+        rollout_priority: P1
+
+  discipline:
+    mission: Convert emotions, process errors, and exceptions into recorded constraints.
+    rules:
+      - id: discipline.exception_has_cost
+        layer: discipline
+        source_books:
+          - Trading in the Zone
+          - How to Win Friends and Influence People
+          - The Greatest Salesman in the World
+          - The Four Books and Five Classics
+        principle: Exceptions are allowed only when named, recorded, and paid for with reduced future freedom.
+        quant_rules:
+          - warn if discipline_exception_count >= 1
+          - block adds if discipline_exception_count >= 2
+          - require exception_reason for every exception
+          - create next_day_constraint after block-level gate violation
+        manual_checks:
+          - Was this exception planned before execution or justified after execution?
+          - What emotion was present: fear, greed, urgency, revenge, boredom?
+        cognitive_reminders:
+          - An unrecorded exception is not flexibility; it is system leakage.
+        system_targets:
+          - portfolio.journal
+          - portfolio.lifecycle_rules
+          - risk.constraint_policy
+          - reports.discipline_exceptions
+        rollout_priority: P0
+
+      - id: discipline.review_to_constraint
+        layer: discipline
+        source_books:
+          - Trading in the Zone
+          - Analects
+          - Tao Te Ching
+          - Hundred Schools of Thought
+        principle: Review is useful only when repeated errors become tomorrow's constraints.
+        quant_rules:
+          - warn if mistake_counts is not empty
+          - reduce exposure if avg_execution_deviation_pct >= 0.02
+          - pause affected strategy if block violations repeat inside policy window
+          - recover only after clean days and matching execution audits
+        manual_checks:
+          - Is the same mistake repeating under a new name?
+          - What rule would have prevented the mistake before the order?
+        cognitive_reminders:
+          - The system should forgive once, restrict twice, and require proof before recovery.
+        system_targets:
+          - portfolio.discipline
+          - risk.constraint_policy
+          - optimizer.health
+          - reports.review_doctor
+        rollout_priority: P0

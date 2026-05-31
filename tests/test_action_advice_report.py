@@ -78,6 +78,28 @@ def test_render_action_advice_lines_includes_lifecycle_pressure():
     assert "退出执行 0.0%" in content
 
 
+def test_render_action_advice_lines_includes_review_doctor_status():
+    lines = render_action_advice_lines(
+        strategy_health=[
+            {
+                "strategy": "dragon",
+                "score": 55,
+                "action": "pause",
+                "alert_level": "block",
+                "alerts": ["review_doctor_warn"],
+                "lifecycle_pressure": {
+                    "summary": "window 5; lifecycle block 2, warn 1",
+                    "doctor_status": "warn",
+                    "doctor_issue_count": 3,
+                },
+            }
+        ],
+    )
+
+    content = "\n".join(lines)
+    assert "复盘账本：预警（3 个问题）" in content
+
+
 def test_render_action_advice_lines_includes_holding_actions():
     lines = render_action_advice_lines(
         strategy_health=[{"strategy": "trend", "score": 70, "action": "keep", "alert_level": "pass"}],

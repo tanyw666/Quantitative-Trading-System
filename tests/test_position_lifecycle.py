@@ -36,9 +36,9 @@ def test_render_position_lifecycle_lines_shows_summary_and_actions():
 
     lines = render_position_lifecycle_lines(snapshot)
 
-    assert any("Buy plan:" in line for line in lines)
-    assert any("Execution:" in line for line in lines)
-    assert any("Action items:" in line for line in lines)
+    assert any("买入计划：" in line for line in lines)
+    assert any("执行情况：" in line for line in lines)
+    assert any("行动项：" in line for line in lines)
 
 
 def test_portfolio_lifecycle_cli_outputs_snapshot(tmp_path, capsys):
@@ -113,5 +113,5 @@ def test_review_lifecycle_cli_outputs_markdown(tmp_path, capsys):
     cli.run_review_lifecycle(args)
 
     output = capsys.readouterr().out
-    assert "Position Lifecycle" in output
-    assert "Buy plan:" in output
+    assert "持仓生命周期" in output
+    assert "买入计划：" in output

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -19,6 +19,10 @@ class StrategyConstraintPolicy:
     recent_block_count: int
     alerts: list[str]
     note: str
+    clean_days: int = 0
+    last_constraint_date: str = ""
+    recovery_ready: bool = False
+    recovery_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -35,91 +39,190 @@ def build_strategy_constraint_policy(
     single_block_pause: int = 1,
     warn_escalation_count: int = 2,
     recover_after_clean_days: int = 3,
+    recover_probe_days: int = 2,
+    recover_probe_exposure_multiplier: float = 0.25,
+    recover_trade_plan_match_rate_min: float = 0.9,
+    recover_max_unmatched_plans: int = 0,
+    recover_max_orphan_trades: int = 0,
     warn_exposure_multiplier: float = 0.5,
 ) -> StrategyConstraintPolicy:
     strategy_name = str(strategy or (strategy_health or {}).get("strategy", "") or "").strip()
-    recent = _recent_strategy_records(constraint_records, strategy_name, as_of=as_of, window_days=window_days)
+    end = as_of or date.today()
+    recent = _recent_strategy_records(constraint_records, strategy_name, as_of=end, window_days=window_days)
     warn_count = sum(1 for item in recent if str(item.get("alert_level", "")) == "warn")
     block_count = sum(1 for item in recent if str(item.get("alert_level", "")) == "block")
     alert_counts: Counter[str] = Counter()
     for item in recent:
         alert_counts.update(str(alert) for alert in item.get("alerts", []) or [] if str(alert))
+
     base_alert = str((strategy_health or {}).get("alert_level", "pass") or "pass")
     base_action = str((strategy_health or {}).get("action", "keep") or "keep")
     top_alerts = [item for item, _count in alert_counts.most_common(3)]
+    history = _dated_strategy_records(constraint_records, strategy_name)
+    restrictive_dates = [
+        item_date
+        for item, item_date in history
+        if item_date is not None and item_date <= end and str(item.get("alert_level", "")) in {"warn", "block"}
+    ]
+    last_constraint_date = max(restrictive_dates) if restrictive_dates else None
+    clean_days = (end - last_constraint_date).days if last_constraint_date else 0
+    recovery = _recovery_evidence(
+        strategy_health,
+        match_rate_min=recover_trade_plan_match_rate_min,
+        max_unmatched_plans=recover_max_unmatched_plans,
+        max_orphan_trades=recover_max_orphan_trades,
+    )
+    last_date_text = last_constraint_date.isoformat() if last_constraint_date else ""
+
+    if restrictive_dates and clean_days >= recover_after_clean_days and recovery["ready"]:
+        if clean_days >= recover_after_clean_days + max(recover_probe_days, 0):
+            return StrategyConstraintPolicy(
+                strategy=strategy_name,
+                state="recovered",
+                action="keep",
+                alert_level="pass",
+                exposure_multiplier=1.0,
+                recent_warn_count=warn_count,
+                recent_block_count=block_count,
+                alerts=_merge_alerts(top_alerts, "constraint_recovered"),
+                note=(
+                    f"Recovery cleared after {clean_days} clean days since {last_date_text}; "
+                    "normal sizing is restored."
+                ),
+                clean_days=clean_days,
+                last_constraint_date=last_date_text,
+                recovery_ready=True,
+                recovery_reasons=list(recovery["reasons"]),
+            )
+        return StrategyConstraintPolicy(
+            strategy=strategy_name,
+            state="recovery_probe",
+            action="reduce",
+            alert_level="warn",
+            exposure_multiplier=max(0.0, min(float(recover_probe_exposure_multiplier), 1.0)),
+            recent_warn_count=warn_count,
+            recent_block_count=block_count,
+            alerts=_merge_alerts(top_alerts, "recovery_probe"),
+            note=(
+                f"Recovery probe enabled after {clean_days} clean days since {last_date_text}; "
+                f"use reduced size for {recover_probe_days} more clean days."
+            ),
+            clean_days=clean_days,
+            last_constraint_date=last_date_text,
+            recovery_ready=True,
+            recovery_reasons=list(recovery["reasons"]),
+        )
 
     if block_count >= cooldown_block_count:
         return StrategyConstraintPolicy(
-            strategy_name,
-            "cooldown",
-            "pause",
-            "block",
-            0.0,
-            warn_count,
-            block_count,
-            _merge_alerts(top_alerts, "constraint_cooldown"),
-            f"近{window_days}日触发 {block_count} 次阻断，进入冷静期：暂停新增仓位，至少等待连续{recover_after_clean_days}日无阻断后再恢复试仓。",
+            strategy=strategy_name,
+            state="cooldown",
+            action="pause",
+            alert_level="block",
+            exposure_multiplier=0.0,
+            recent_warn_count=warn_count,
+            recent_block_count=block_count,
+            alerts=_merge_alerts(top_alerts, "constraint_cooldown"),
+            note=(
+                f"Blocked {block_count} times inside the last {window_days} days; "
+                f"pause new BUY orders and wait for at least {recover_after_clean_days} clean days "
+                f"(连续{recover_after_clean_days}日)."
+            ),
+            clean_days=clean_days,
+            last_constraint_date=last_date_text,
+            recovery_ready=False,
+            recovery_reasons=list(recovery["reasons"]),
         )
     if block_count >= single_block_pause:
         return StrategyConstraintPolicy(
-            strategy_name,
-            "blocked",
-            "pause",
-            "block",
-            0.0,
-            warn_count,
-            block_count,
-            _merge_alerts(top_alerts, "constraint_cooldown"),
-            f"近{window_days}日出现阻断记录，明日先暂停新增仓位；连续{recover_after_clean_days}日无阻断后再恢复试仓。复盘触发原因：{alert_reasons_text(top_alerts)}。",
+            strategy=strategy_name,
+            state="blocked",
+            action="pause",
+            alert_level="block",
+            exposure_multiplier=0.0,
+            recent_warn_count=warn_count,
+            recent_block_count=block_count,
+            alerts=_merge_alerts(top_alerts, "constraint_cooldown"),
+            note=(
+                f"A block constraint was triggered within the last {window_days} days; "
+                f"pause new BUY orders until at least {recover_after_clean_days} clean days have passed "
+                f"(连续{recover_after_clean_days}日)."
+            ),
+            clean_days=clean_days,
+            last_constraint_date=last_date_text,
+            recovery_ready=False,
+            recovery_reasons=list(recovery["reasons"]),
         )
     if warn_count >= warn_escalation_count:
         return StrategyConstraintPolicy(
-            strategy_name,
-            "repeated_warn",
-            "reduce",
-            "warn",
-            warn_exposure_multiplier,
-            warn_count,
-            block_count,
-            _merge_alerts(top_alerts, "repeated_warn"),
-            f"近{window_days}日连续预警 {warn_count} 次，明日只允许半仓上限和计划内交易。",
+            strategy=strategy_name,
+            state="repeated_warn",
+            action="reduce",
+            alert_level="warn",
+            exposure_multiplier=warn_exposure_multiplier,
+            recent_warn_count=warn_count,
+            recent_block_count=block_count,
+            alerts=_merge_alerts(top_alerts, "repeated_warn"),
+            note=(
+                f"Warn constraints were triggered {warn_count} times in the last {window_days} days; "
+                "reduce exposure and trade only inside the written plan."
+            ),
+            clean_days=clean_days,
+            last_constraint_date=last_date_text,
+            recovery_ready=False,
+            recovery_reasons=list(recovery["reasons"]),
         )
     if warn_count > 0 or base_alert == "warn":
         alerts = top_alerts or list((strategy_health or {}).get("alerts", []) or [])
         return StrategyConstraintPolicy(
-            strategy_name,
-            "watch",
-            "reduce" if base_action != "pause" else "pause",
-            "warn",
-            warn_exposure_multiplier,
-            warn_count,
-            block_count,
-            _merge_alerts(alerts, "recovery_probe"),
-            f"策略处于预警观察，明日降半档执行；连续{recover_after_clean_days}日无新增约束后恢复正常仓位。",
+            strategy=strategy_name,
+            state="watch",
+            action="reduce" if base_action != "pause" else "pause",
+            alert_level="warn",
+            exposure_multiplier=warn_exposure_multiplier,
+            recent_warn_count=warn_count,
+            recent_block_count=block_count,
+            alerts=_merge_alerts(alerts, "recovery_watch"),
+            note=(
+                f"Strategy is under warning watch; after {recover_after_clean_days} clean days "
+                f"(连续{recover_after_clean_days}日) it may enter recovery-probe mode if the review evidence is clean."
+            ),
+            clean_days=clean_days,
+            last_constraint_date=last_date_text,
+            recovery_ready=False,
+            recovery_reasons=list(recovery["reasons"]),
         )
     if base_alert == "block" or base_action == "pause":
         return StrategyConstraintPolicy(
-            strategy_name,
-            "blocked",
-            "pause",
-            "block",
-            0.0,
-            warn_count,
-            block_count,
-            _merge_alerts(list((strategy_health or {}).get("alerts", []) or []), "constraint_cooldown"),
-            "策略健康度仍为阻断状态，明日暂停新增仓位。",
+            strategy=strategy_name,
+            state="blocked",
+            action="pause",
+            alert_level="block",
+            exposure_multiplier=0.0,
+            recent_warn_count=warn_count,
+            recent_block_count=block_count,
+            alerts=_merge_alerts(list((strategy_health or {}).get("alerts", []) or []), "constraint_cooldown"),
+            note="Strategy health is still blocked; do not open new BUY positions yet.",
+            clean_days=clean_days,
+            last_constraint_date=last_date_text,
+            recovery_ready=False,
+            recovery_reasons=list(recovery["reasons"]),
         )
 
     return StrategyConstraintPolicy(
-        strategy_name,
-        "normal",
-        base_action,
-        "pass",
-        1.0,
-        warn_count,
-        block_count,
-        [],
-        f"近{window_days}日无策略约束触发，可按市场温度和候选质量正常执行。",
+        strategy=strategy_name,
+        state="normal",
+        action=base_action,
+        alert_level="pass",
+        exposure_multiplier=1.0,
+        recent_warn_count=warn_count,
+        recent_block_count=block_count,
+        alerts=[],
+        note=f"No active constraint in the last {window_days} days; normal execution is allowed.",
+        clean_days=clean_days,
+        last_constraint_date=last_date_text,
+        recovery_ready=True,
+        recovery_reasons=list(recovery["reasons"]),
     )
 
 
@@ -133,6 +236,11 @@ def apply_constraint_policy_to_health(
     single_block_pause: int = 1,
     warn_escalation_count: int = 2,
     recover_after_clean_days: int = 3,
+    recover_probe_days: int = 2,
+    recover_probe_exposure_multiplier: float = 0.25,
+    recover_trade_plan_match_rate_min: float = 0.9,
+    recover_max_unmatched_plans: int = 0,
+    recover_max_orphan_trades: int = 0,
     warn_exposure_multiplier: float = 0.5,
 ) -> dict[str, Any]:
     policy = build_strategy_constraint_policy(
@@ -144,6 +252,11 @@ def apply_constraint_policy_to_health(
         single_block_pause=single_block_pause,
         warn_escalation_count=warn_escalation_count,
         recover_after_clean_days=recover_after_clean_days,
+        recover_probe_days=recover_probe_days,
+        recover_probe_exposure_multiplier=recover_probe_exposure_multiplier,
+        recover_trade_plan_match_rate_min=recover_trade_plan_match_rate_min,
+        recover_max_unmatched_plans=recover_max_unmatched_plans,
+        recover_max_orphan_trades=recover_max_orphan_trades,
         warn_exposure_multiplier=warn_exposure_multiplier,
     )
     adjusted = dict(strategy_health)
@@ -153,24 +266,47 @@ def apply_constraint_policy_to_health(
         "single_block_pause": single_block_pause,
         "warn_escalation_count": warn_escalation_count,
         "recover_after_clean_days": recover_after_clean_days,
+        "recover_probe_days": recover_probe_days,
+        "recover_probe_exposure_multiplier": recover_probe_exposure_multiplier,
+        "recover_trade_plan_match_rate_min": recover_trade_plan_match_rate_min,
+        "recover_max_unmatched_plans": recover_max_unmatched_plans,
+        "recover_max_orphan_trades": recover_max_orphan_trades,
         "warn_exposure_multiplier": warn_exposure_multiplier,
     }
     adjusted["constraint_policy"] = policy.to_dict()
     adjusted["policy_state"] = policy.state
     adjusted["policy_note"] = policy.note
     adjusted["policy_exposure_multiplier"] = policy.exposure_multiplier
+    adjusted["policy_clean_days"] = policy.clean_days
+    adjusted["policy_last_constraint_date"] = policy.last_constraint_date
+    adjusted["policy_recovery_ready"] = policy.recovery_ready
+    adjusted["policy_recovery_reasons"] = list(policy.recovery_reasons)
+
     trade_plan_audit = dict(adjusted.get("trade_plan_audit") or {})
     if trade_plan_audit:
         adjusted["policy_trade_plan_match_rate"] = float(trade_plan_audit.get("match_rate", 0) or 0)
         adjusted["policy_trade_plan_avg_price_deviation_pct"] = float(trade_plan_audit.get("avg_price_deviation_pct", 0) or 0)
         if float(trade_plan_audit.get("match_rate", 0) or 0) < 0.85:
-            adjusted["policy_exposure_multiplier"] = min(float(adjusted.get("policy_exposure_multiplier", 1.0) or 1.0), warn_exposure_multiplier)
+            adjusted["policy_exposure_multiplier"] = min(
+                float(adjusted.get("policy_exposure_multiplier", 1.0) or 1.0),
+                warn_exposure_multiplier,
+            )
             adjusted["alerts"] = _merge_alerts(list(adjusted.get("alerts", []) or []), "trade_plan_drift")
-        adjusted["policy_note"] = f"{policy.note}；计划命中率 {float(trade_plan_audit.get('match_rate', 0) or 0):.1%}"
+        adjusted["policy_note"] = (
+            f"{policy.note}; 计划命中率/plan match rate "
+            f"{float(trade_plan_audit.get('match_rate', 0) or 0):.1%}"
+        )
+
     if _alert_rank(policy.alert_level) > _alert_rank(str(adjusted.get("alert_level", "pass"))):
         adjusted["alert_level"] = policy.alert_level
+    elif policy.state in {"recovered"}:
+        adjusted["alert_level"] = "pass"
+
     if policy.action in {"pause", "reduce"}:
         adjusted["action"] = policy.action
+    elif policy.state in {"recovered"} and str(adjusted.get("action", "")) == "pause":
+        adjusted["action"] = "keep"
+
     adjusted["alerts"] = _merge_alerts(list(adjusted.get("alerts", []) or []), *policy.alerts)
     return adjusted
 
@@ -182,18 +318,87 @@ def _recent_strategy_records(
     as_of: date | None,
     window_days: int,
 ) -> list[dict[str, Any]]:
-    dated = [(record, _record_date(record)) for record in records if _record_date(record)]
+    dated = _dated_strategy_records(records, strategy)
     if not dated:
         return []
-    end = as_of or max(item_date for _record, item_date in dated if item_date is not None)
+    usable_dates = [item_date for _record, item_date in dated if item_date is not None]
+    if not usable_dates:
+        return []
+    end = as_of or max(usable_dates)
     start = end - timedelta(days=max(window_days - 1, 0))
     return [
         record
         for record, item_date in dated
-        if item_date is not None
-        and start <= item_date <= end
-        and (not strategy or str(record.get("strategy", "")).strip() == strategy)
+        if item_date is not None and start <= item_date <= end
     ]
+
+
+def _dated_strategy_records(records: list[dict[str, Any]], strategy: str) -> list[tuple[dict[str, Any], date | None]]:
+    return [
+        (record, _record_date(record))
+        for record in records
+        if not strategy or str(record.get("strategy", "")).strip() == strategy
+    ]
+
+
+def _recovery_evidence(
+    strategy_health: dict[str, Any] | None,
+    *,
+    match_rate_min: float,
+    max_unmatched_plans: int,
+    max_orphan_trades: int,
+) -> dict[str, Any]:
+    health = dict(strategy_health or {})
+    reasons: list[str] = []
+    ready = True
+
+    trade_plan_audit = dict(health.get("trade_plan_audit") or {})
+    if trade_plan_audit:
+        match_rate = float(trade_plan_audit.get("match_rate", 0) or 0)
+        unmatched_plans = int(trade_plan_audit.get("unmatched_plans", 0) or 0)
+        orphan_trades = int(trade_plan_audit.get("orphan_trades", 0) or 0)
+        if match_rate < match_rate_min:
+            ready = False
+            reasons.append(f"plan match {match_rate:.1%} < {match_rate_min:.1%}")
+        else:
+            reasons.append(f"plan match {match_rate:.1%}")
+        if unmatched_plans > max_unmatched_plans:
+            ready = False
+            reasons.append(f"unmatched plans {unmatched_plans} > {max_unmatched_plans}")
+        if orphan_trades > max_orphan_trades:
+            ready = False
+            reasons.append(f"orphan trades {orphan_trades} > {max_orphan_trades}")
+    else:
+        reasons.append("no trade-plan audit history")
+
+    lifecycle_pressure = dict(health.get("lifecycle_pressure") or {})
+    if lifecycle_pressure:
+        doctor_status = str(lifecycle_pressure.get("doctor_status", "") or "")
+        if doctor_status in {"warn", "fail"}:
+            ready = False
+            reasons.append(f"review doctor {doctor_status}")
+        issue_names = {str(item) for item in lifecycle_pressure.get("doctor_issue_names", []) or []}
+        blocking_issues = {
+            "missing_execution_confirmations",
+            "missing_lifecycle_snapshots",
+            "missing_trading_day_states",
+            "stale_lifecycle_snapshot",
+            "stale_trading_day_state",
+            "latest_lifecycle_blocked",
+            "latest_trading_day_blocked",
+            "latest_exit_sell_all",
+        }
+        still_open = sorted(issue_names & blocking_issues)
+        if still_open:
+            ready = False
+            reasons.append("open doctor issues: " + ", ".join(still_open))
+        latest_match_rate = lifecycle_pressure.get("latest_trade_plan_match_rate")
+        if latest_match_rate not in (None, "") and float(latest_match_rate) >= match_rate_min:
+            reasons.append(f"latest lifecycle match {float(latest_match_rate):.1%}")
+    else:
+        reasons.append("no review-memory pressure history")
+
+    return {"ready": ready, "reasons": reasons}
 
 
 def _record_date(record: dict[str, Any]) -> date | None:

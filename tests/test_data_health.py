@@ -41,6 +41,67 @@ def test_check_ohlcv_health_fails_duplicate_dates():
     assert any(issue.name == "duplicates" for issue in report.issues)
 
 
+def test_check_ohlcv_health_fails_latest_zero_volume():
+    frame = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "symbol": ["000001", "000001"],
+            "open": [10, 10],
+            "high": [11, 11],
+            "low": [9, 9],
+            "close": [10, 10],
+            "volume": [1000, 0],
+        }
+    )
+
+    report = check_ohlcv_health(frame, min_rows_per_symbol=1)
+    issue = next(issue for issue in report.issues if issue.name == "zero_volume")
+
+    assert report.status == "fail"
+    assert issue.status == "fail"
+    assert issue.details is not None
+    assert issue.details["latest_zero_samples"][0]["symbol"] == "000001"
+
+
+def test_check_ohlcv_health_warns_historical_zero_volume_only():
+    frame = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "symbol": ["000001", "000001"],
+            "open": [10, 10],
+            "high": [11, 11],
+            "low": [9, 9],
+            "close": [10, 10],
+            "volume": [0, 1000],
+        }
+    )
+
+    report = check_ohlcv_health(frame, min_rows_per_symbol=1)
+    issue = next(issue for issue in report.issues if issue.name == "zero_volume")
+
+    assert report.status == "warn"
+    assert issue.status == "warn"
+
+
+def test_check_ohlcv_health_fails_incoherent_high_low_against_close():
+    frame = pd.DataFrame(
+        {
+            "date": ["2024-01-01"],
+            "symbol": ["000001"],
+            "open": [10],
+            "high": [9],
+            "low": [8],
+            "close": [10],
+            "volume": [1000],
+        }
+    )
+
+    report = check_ohlcv_health(frame, min_rows_per_symbol=1)
+
+    assert report.status == "fail"
+    assert any(issue.name == "price_sanity" and issue.status == "fail" for issue in report.issues)
+
+
 def test_check_ohlcv_health_warns_on_symbol_level_staleness():
     frame = pd.DataFrame(
         {

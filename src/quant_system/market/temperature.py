@@ -26,7 +26,7 @@ class MarketTemperature:
     def summary_text(self) -> str:
         return (
             f"市场温度 {self.score:.1f}/100，状态 {self.regime}，建议 {self.stance}。"
-            f"上涨占比 {self.advance_ratio:.1%}，站上MA20 {self.above_ma20_ratio:.1%}，"
+            f" 上涨占比 {self.advance_ratio:.1%}，站上 MA20 {self.above_ma20_ratio:.1%}，"
             f"正动量 {self.positive_momentum_ratio:.1%}，候选占比 {self.candidate_ratio:.1%}。"
         )
 

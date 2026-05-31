@@ -45,6 +45,10 @@ def render_action_advice_lines(
     if lifecycle_pressure:
         summary = lifecycle_pressure.get("summary") or f"状态 {lifecycle_pressure.get('status', '-')}"
         lines.append(f"- 生命周期压力：{summary}")
+        doctor_status = str(lifecycle_pressure.get("doctor_status", "") or "")
+        doctor_issue_count = int(lifecycle_pressure.get("doctor_issue_count", 0) or 0)
+        if doctor_status:
+            lines.append(f"- 复盘账本：{_status_label(doctor_status)}（{doctor_issue_count} 个问题）")
 
     if allocation_plan:
         if allocation_plan.get("strategy_adjustment_note"):
@@ -86,7 +90,7 @@ def render_action_advice_lines(
         take_profit_count = int(exit_plan.get("take_profit_count", 0) or 0)
         reduce_count = int(exit_plan.get("reduce_count", 0) or 0)
         if sell_all_count or take_profit_count or reduce_count:
-            lines.append(f"- Exit plan focus: sell all {sell_all_count}, take profit {take_profit_count}, reduce {reduce_count}.")
+            lines.append(f"- 退出计划重点：清仓 {sell_all_count}，止盈 {take_profit_count}，减仓 {reduce_count}。")
     return lines
 
 
@@ -106,3 +110,7 @@ def _action_label(action: str) -> str:
         "reduce": "降低仓位/暂缓",
         "pause": "暂停策略",
     }.get(action, action or "保持观察")
+
+
+def _status_label(status: str) -> str:
+    return {"pass": "通过", "warn": "预警", "block": "阻断", "fail": "失败"}.get(status, status or "未知")
