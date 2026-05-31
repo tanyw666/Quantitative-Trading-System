@@ -14,6 +14,11 @@ def test_system_settings_defaults_are_reasonable():
     assert settings.risk.constraint_policy.recover_probe_exposure_multiplier == 0.25
     assert settings.risk.constraint_policy.warn_exposure_multiplier == 0.5
     assert settings.trading_day.phases == {}
+    assert settings.liquidity_funnel.enabled is True
+    assert settings.liquidity_funnel.lookback_bars == 250
+    assert settings.liquidity_funnel.default_top_n == 800
+    assert settings.liquidity_funnel.conservative_top_n == 500
+    assert settings.liquidity_funnel.aggressive_top_n == 1200
 
 
 def test_system_settings_from_mapping_overrides_defaults():
@@ -31,6 +36,15 @@ def test_system_settings_from_mapping_overrides_defaults():
                     "warn_exposure_multiplier": 0.4,
                 },
             },
+            "liquidity_funnel": {
+                "enabled": True,
+                "mode": "intersect",
+                "lookback_bars": 120,
+                "default_top_n": 800,
+                "conservative_top_n": 300,
+                "aggressive_top_n": 1200,
+                "min_traded_value": 150000000,
+            },
         }
     )
 
@@ -42,6 +56,13 @@ def test_system_settings_from_mapping_overrides_defaults():
     assert settings.risk.constraint_policy.recover_probe_exposure_multiplier == 0.2
     assert settings.risk.constraint_policy.recover_trade_plan_match_rate_min == 0.92
     assert settings.risk.constraint_policy.warn_exposure_multiplier == 0.4
+    assert settings.liquidity_funnel.enabled is True
+    assert settings.liquidity_funnel.mode == "intersect"
+    assert settings.liquidity_funnel.lookback_bars == 120
+    assert settings.liquidity_funnel.default_top_n == 800
+    assert settings.liquidity_funnel.conservative_top_n == 300
+    assert settings.liquidity_funnel.aggressive_top_n == 1200
+    assert settings.liquidity_funnel.min_traded_value == 150000000
 
 
 def test_system_settings_rejects_non_mapping_sections():
@@ -108,3 +129,7 @@ def test_load_settings_reads_default_system_yaml():
     assert settings.data_sources.daily_source == "csv"
     assert settings.trading_day.phases["premarket"]["extra_checklist"][0] == "确认最终作战单已经生成并留档"
     assert settings.risk.constraint_policy.warn_exposure_multiplier == 0.5
+    assert settings.liquidity_funnel.enabled is True
+    assert settings.liquidity_funnel.lookback_bars == 250
+    assert settings.liquidity_funnel.default_top_n == 800
+    assert settings.liquidity_funnel.aggressive_top_n == 1200

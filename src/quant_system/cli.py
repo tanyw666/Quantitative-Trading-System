@@ -213,6 +213,11 @@ from quant_system.risk.constraint_audit import (
     summarize_constraint_audit_records,
 )
 from quant_system.risk.constraint_policy import apply_constraint_policy_to_health
+from quant_system.screening.liquidity_funnel import (
+    LiquidityFunnelConfig,
+    apply_liquidity_funnel,
+    limit_recent_trading_days,
+)
 from quant_system.screening.scoring import score_candidates
 from quant_system.strategies.dragon_leader import latest_dragon_diagnostics
 from quant_system.strategies.registry import create_strategy, create_strategy_from_config
@@ -259,6 +264,8 @@ def build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--top", type=int, help="Limit to top N results")
     add_strategy_constraint_args(screen)
     add_sector_context_args(screen)
+    add_history_window_args(screen)
+    add_liquidity_funnel_args(screen)
 
     dragon = subparsers.add_parser("dragon", help="Dragon strategy tools")
     dragon_sub = dragon.add_subparsers(dest="dragon_command", required=True)
@@ -821,6 +828,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_sector_context_args(db_screen)
     add_dragon_gate_arg(db_screen)
     add_dragon_entry_model_arg(db_screen)
+    add_history_window_args(db_screen)
+    add_liquidity_funnel_args(db_screen)
 
     db_health = db_sub.add_parser("health", help="Check SQLite daily bars health")
     db_health.add_argument("--db-path", type=Path, default=Path("data/quant.sqlite"))
@@ -1510,6 +1519,29 @@ def add_sector_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--only-top-sectors", action="store_true", help="Keep only candidates in top sectors")
 
 
+def add_history_window_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--lookback-days", type=int, help="Limit source data to recent calendar days")
+    parser.add_argument("--lookback-bars", type=int, help="Limit source data to recent trading bars")
+
+
+def add_liquidity_funnel_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--liquidity-profile",
+        choices=["off", "conservative", "standard", "aggressive"],
+        help="Liquidity funnel preset; conservative is narrower, standard is broader",
+    )
+    parser.add_argument(
+        "--liquidity-mode",
+        choices=["tag", "intersect", "boost"],
+        help="Liquidity funnel behavior: tag only, intersect with funnel pass, or boost ranking by liquidity",
+    )
+    parser.add_argument("--liquidity-top", type=int, help="Override liquidity top-N threshold")
+    parser.add_argument("--liquidity-min-traded-value", type=float, help="Minimum traded value that qualifies for liquidity pass")
+    parser.add_argument("--liquidity-universe", type=Path, help="Optional CSV universe used as the secondary liquidity subset")
+    parser.add_argument("--liquidity-csv", type=Path, help="Optional OHLCV CSV used as the secondary liquidity subset")
+    parser.add_argument("--liquidity-lookback-bars", type=int, help="Optional bar limit for the secondary liquidity subset")
+
+
 def add_discipline_record_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--record-discipline", action="store_true", help="Persist discipline advice for review")
     parser.add_argument("--discipline-log", type=Path, default=Path("data/review/discipline.jsonl"))
@@ -1615,6 +1647,7 @@ def settings_from_args(args: argparse.Namespace):
                 "constraint_policy": merged_constraint_policy,
             },
             "data_sources": settings.data_sources.__dict__,
+            "liquidity_funnel": settings.liquidity_funnel.__dict__,
         }
     )
 
@@ -1698,6 +1731,92 @@ def _strategy_health_exposure_multiplier(strategy_health: dict | None) -> float:
     return max(0.0, min(float(value), 1.0))
 
 
+def liquidity_funnel_config_from_args(args: argparse.Namespace, settings: SystemSettings) -> LiquidityFunnelConfig:
+    settings_config = getattr(settings, "liquidity_funnel", SystemSettings().liquidity_funnel)
+    profile = str(getattr(args, "liquidity_profile", "") or "").strip().lower()
+    explicit_enabled = any(
+        getattr(args, name, None) not in (None, "", False)
+        for name in (
+            "liquidity_mode",
+            "liquidity_top",
+            "liquidity_min_traded_value",
+            "liquidity_universe",
+            "liquidity_csv",
+            "liquidity_lookback_bars",
+        )
+    )
+    enabled = settings_config.enabled or explicit_enabled or profile in {"conservative", "standard", "aggressive"}
+    if profile == "off":
+        enabled = False
+    mode = str(getattr(args, "liquidity_mode", None) or settings_config.mode or "tag")
+    custom_top = getattr(args, "liquidity_top", None)
+    default_top = settings_config.default_top_n
+    conservative_top = settings_config.conservative_top_n
+    aggressive_top = settings_config.aggressive_top_n
+    if custom_top and profile == "conservative":
+        conservative_top = int(custom_top)
+    elif custom_top and profile == "aggressive":
+        aggressive_top = int(custom_top)
+    elif custom_top:
+        default_top = int(custom_top)
+        conservative_top = min(int(conservative_top), int(default_top))
+    min_traded_value = (
+        float(getattr(args, "liquidity_min_traded_value"))
+        if getattr(args, "liquidity_min_traded_value", None) is not None
+        else float(settings_config.min_traded_value)
+    )
+    return LiquidityFunnelConfig(
+        enabled=enabled,
+        mode=mode,
+        profile=profile if profile and profile != "off" else "standard",
+        lookback_bars=int(getattr(args, "lookback_bars", None) or settings_config.lookback_bars),
+        default_top_n=int(default_top),
+        conservative_top_n=int(conservative_top),
+        aggressive_top_n=int(aggressive_top),
+        custom_top_n=int(custom_top) if custom_top else None,
+        min_traded_value=min_traded_value,
+    )
+
+
+def liquidity_subset_from_args(
+    args: argparse.Namespace,
+    *,
+    strategy,
+    settings: SystemSettings,
+) -> tuple[pd.DataFrame | None, set[str] | None]:
+    liquidity_csv = getattr(args, "liquidity_csv", None)
+    if liquidity_csv:
+        frame = read_ohlcv_csv(liquidity_csv)
+        frame = limit_recent_trading_days(frame, getattr(args, "liquidity_lookback_bars", None))
+        candidates = strategy.screen(frame)
+        candidates = enrich_and_score_candidates(
+            frame,
+            candidates,
+            settings.scoring.weights,
+            sector_column=getattr(args, "sector_column", None),
+            sector_top=getattr(args, "sector_top", 5),
+            only_top_sectors=False,
+        )
+        return candidates, None
+
+    liquidity_universe = getattr(args, "liquidity_universe", None)
+    if liquidity_universe:
+        symbols = {stock.symbol for stock in read_universe(liquidity_universe)}
+        return None, symbols
+    return None, None
+
+
+def screening_lookback_bars_from_args(args: argparse.Namespace, settings: SystemSettings) -> int | None:
+    explicit = getattr(args, "lookback_bars", None)
+    if explicit is not None:
+        return int(explicit)
+    settings_config = getattr(settings, "liquidity_funnel", SystemSettings().liquidity_funnel)
+    value = getattr(settings_config, "lookback_bars", None)
+    if value is None:
+        return None
+    return int(value)
+
+
 def screened_candidates_from_args(
     args: argparse.Namespace,
     frame: pd.DataFrame,
@@ -1710,6 +1829,8 @@ def screened_candidates_from_args(
     sector_top: int | None = None,
 ) -> pd.DataFrame:
     settings = settings or settings_from_args(args)
+    effective_lookback_bars = screening_lookback_bars_from_args(args, settings)
+    frame = limit_recent_trading_days(frame, effective_lookback_bars)
     if getattr(args, "portfolio_config", None):
         portfolio_config = StrategyPortfolioConfig.from_yaml(args.portfolio_config)
         health_by_strategy = {
@@ -1756,6 +1877,20 @@ def screened_candidates_from_args(
         sector_top=sector_top if sector_top is not None else getattr(args, "sector_top", 5),
         only_top_sectors=only_top_sectors if only_top_sectors is not None else getattr(args, "only_top_sectors", False),
     )
+    liquidity_config = liquidity_funnel_config_from_args(args, settings)
+    if liquidity_config.enabled:
+        liquidity_candidates, liquidity_symbols = liquidity_subset_from_args(
+            args,
+            strategy=strategy,
+            settings=settings,
+        )
+        candidates = apply_liquidity_funnel(
+            candidates,
+            frame,
+            liquidity_config,
+            liquidity_candidates=liquidity_candidates,
+            liquidity_symbols=liquidity_symbols,
+        )
     candidate_limit = top if top is not None else getattr(args, "top", None)
     if candidate_limit:
         candidates = candidates.head(candidate_limit)
@@ -1765,6 +1900,7 @@ def screened_candidates_from_args(
 def run_screen(args: argparse.Namespace) -> None:
     frame = load_ohlcv_dataset(args.csv, args.cache_dir, args.universe)
     frame = limit_recent_history(frame, getattr(args, "lookback_days", None))
+    frame = limit_recent_trading_days(frame, getattr(args, "lookback_bars", None))
     frame = prefilter_dragon_universe(frame, args.strategy, getattr(args, "prefilter_symbols", None))
     strategy = None if getattr(args, "portfolio_config", None) else strategy_from_args(args)
     if strategy is not None:
@@ -3859,6 +3995,8 @@ def run_data_db_screen(args: argparse.Namespace) -> None:
     if frame.empty:
         raise FileNotFoundError("Daily bars table is empty. Import daily bars first.")
     frame = frame.merge(universe, on="symbol", how="left")
+    frame = limit_recent_history(frame, getattr(args, "lookback_days", None))
+    frame = limit_recent_trading_days(frame, getattr(args, "lookback_bars", None))
     strategy = strategy_from_args(args)
     args._resolved_strategy = strategy
     settings = settings_from_args(args)

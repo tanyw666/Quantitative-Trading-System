@@ -130,6 +130,12 @@ def test_screen_parsers_accept_constraint_inputs():
             "--constraint-log",
             "constraints.jsonl",
             "--disable-approval-cooldown",
+            "--lookback-bars",
+            "250",
+            "--liquidity-profile",
+            "standard",
+            "--liquidity-top",
+            "800",
         ]
     )
     dragon_args = cli.build_parser().parse_args(
@@ -146,6 +152,9 @@ def test_screen_parsers_accept_constraint_inputs():
 
     assert str(screen_args.constraint_log) == "constraints.jsonl"
     assert screen_args.disable_approval_cooldown is True
+    assert screen_args.lookback_bars == 250
+    assert screen_args.liquidity_profile == "standard"
+    assert screen_args.liquidity_top == 800
     assert str(dragon_args.constraint_log) == "constraints.jsonl"
     assert dragon_args.disable_approval_cooldown is True
 
@@ -202,6 +211,60 @@ def test_run_screen_does_not_record_blocked_candidates(monkeypatch, tmp_path, ca
     assert len(payload) == 1
     assert bool(payload[0]["strategy_actionable"]) is False
     assert tracker.exists() is False
+
+
+def test_run_screen_can_tag_liquidity_funnel_candidates(monkeypatch, tmp_path, capsys):
+    args = cli.build_parser().parse_args(
+        [
+            "screen",
+            "--csv",
+            "prices.csv",
+            "--liquidity-profile",
+            "standard",
+            "--liquidity-top",
+            "1",
+            "--liquidity-min-traded-value",
+            "999999999",
+            "--disable-approval-cooldown",
+        ]
+    )
+
+    class DummyStrategy:
+        name = "strong_stock_screen"
+
+        def screen(self, frame):
+            return pd.DataFrame(
+                {
+                    "symbol": ["000001", "000002"],
+                    "name": ["Liquid", "Expansion"],
+                    "score": [80.0, 70.0],
+                    "close": [10.0, 9.0],
+                    "risk_grade": ["medium", "medium"],
+                }
+            )
+
+    frame = pd.DataFrame(
+        {
+            "date": ["2026-05-29", "2026-05-29"],
+            "symbol": ["000001", "000002"],
+            "close": [10.0, 9.0],
+            "volume": [1000, 900],
+            "amount": [300_000_000, 50_000_000],
+        }
+    )
+    monkeypatch.setattr(cli, "load_ohlcv_dataset", lambda *a, **k: frame)
+    monkeypatch.setattr(cli, "strategy_from_args", lambda _args: DummyStrategy())
+    monkeypatch.setattr(cli, "enrich_and_score_candidates", lambda _frame, candidates, *_args, **_kwargs: candidates)
+    monkeypatch.setattr(cli, "_current_strategy_health", lambda _args: {"strategy": "strong_stock_screen", "alert_level": "pass", "action": "keep"})
+
+    cli.run_screen(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["symbol"] == "000001"
+    assert payload[0]["funnel_stage"] == "core_conservative"
+    assert payload[1]["symbol"] == "000002"
+    assert payload[1]["funnel_stage"] == "core_aggressive"
+    assert payload[1]["liquidity_pass"] is False
 
 
 def _strategy_args(tmp_path, constraint_log):

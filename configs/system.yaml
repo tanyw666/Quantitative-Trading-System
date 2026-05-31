@@ -47,6 +47,14 @@ scoring:
     candle_quality_score: 0.03
     breakout_quality_score: 0.04
     false_breakout_pressure: 0.03
+liquidity_funnel:
+  enabled: true
+  mode: tag
+  lookback_bars: 250
+  default_top_n: 800
+  conservative_top_n: 500
+  aggressive_top_n: 1200
+  min_traded_value: 200000000
 risk:
   regime_exposure:
     hot: 0.80

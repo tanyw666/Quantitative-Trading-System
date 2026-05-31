@@ -57,6 +57,17 @@ DEFAULT_CONSTRAINT_POLICY = {
 }
 
 
+DEFAULT_LIQUIDITY_FUNNEL = {
+    "enabled": True,
+    "mode": "tag",
+    "lookback_bars": 250,
+    "default_top_n": 800,
+    "conservative_top_n": 500,
+    "aggressive_top_n": 1200,
+    "min_traded_value": 200000000.0,
+}
+
+
 @dataclass(frozen=True)
 class ScoringSettings:
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCORING_WEIGHTS))
@@ -153,11 +164,23 @@ class TradingDaySettings:
 
 
 @dataclass(frozen=True)
+class LiquidityFunnelSettings:
+    enabled: bool = True
+    mode: str = "tag"
+    lookback_bars: int = 250
+    default_top_n: int = 800
+    conservative_top_n: int = 500
+    aggressive_top_n: int = 1200
+    min_traded_value: float = 200000000.0
+
+
+@dataclass(frozen=True)
 class SystemSettings:
     scoring: ScoringSettings = field(default_factory=ScoringSettings)
     risk: RiskSettings = field(default_factory=RiskSettings)
     data_sources: DataSourceSettings = field(default_factory=DataSourceSettings)
     trading_day: TradingDaySettings = field(default_factory=TradingDaySettings)
+    liquidity_funnel: LiquidityFunnelSettings = field(default_factory=LiquidityFunnelSettings)
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "SystemSettings":
@@ -167,6 +190,7 @@ class SystemSettings:
         legacy_data_mapping = _require_mapping(mapping.get("data", {}), "data")
         data_mapping = _require_mapping(mapping.get("data_sources", {}), "data_sources")
         trading_day_mapping = _require_mapping(mapping.get("trading_day", {}), "trading_day")
+        liquidity_mapping = _require_mapping(mapping.get("liquidity_funnel", {}), "liquidity_funnel")
         return cls(
             scoring=ScoringSettings(weights=_merge(DEFAULT_SCORING_WEIGHTS, _require_mapping(scoring_mapping.get("weights", {}), "scoring.weights"))),
             risk=RiskSettings(
@@ -196,6 +220,7 @@ class SystemSettings:
                     _require_mapping(trading_day_mapping.get("phases", {}), "trading_day.phases")
                 ),
             ),
+            liquidity_funnel=_liquidity_funnel_settings(liquidity_mapping),
         )
 
 
@@ -265,6 +290,25 @@ def _constraint_policy_settings(mapping: dict[str, Any]) -> ConstraintPolicySett
         recover_max_orphan_trades=int(merged.get("recover_max_orphan_trades", 0)),
         warn_exposure_multiplier=float(merged.get("warn_exposure_multiplier", 0.5)),
         strategy_overrides=strategy_overrides,
+    )
+
+
+def _liquidity_funnel_settings(mapping: dict[str, Any]) -> LiquidityFunnelSettings:
+    merged = dict(DEFAULT_LIQUIDITY_FUNNEL)
+    for key, value in mapping.items():
+        if value is not None:
+            merged[str(key)] = value
+    mode = str(merged.get("mode", "tag") or "tag").strip().lower()
+    if mode not in {"tag", "intersect", "boost"}:
+        raise ValueError("liquidity_funnel.mode must be one of: tag, intersect, boost")
+    return LiquidityFunnelSettings(
+        enabled=bool(merged.get("enabled", False)),
+        mode=mode,
+        lookback_bars=int(merged.get("lookback_bars", 250)),
+        default_top_n=int(merged.get("default_top_n", merged.get("standard_top_n", 800))),
+        conservative_top_n=int(merged.get("conservative_top_n", 500)),
+        aggressive_top_n=int(merged.get("aggressive_top_n", 1200)),
+        min_traded_value=float(merged.get("min_traded_value", 200000000.0)),
     )
 
 

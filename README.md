@@ -56,6 +56,8 @@ python -m quant_system workflow daily `
 
 ```powershell
 python -m quant_system screen --csv data/sample_ohlcv.csv --strategy strong_stock_screen --top 10
+python -m quant_system data db screen --db-path data/quant.sqlite --strategy strong_stock_screen --lookback-bars 250 --liquidity-profile standard --liquidity-mode tag --top 20
+python -m quant_system data db screen --db-path data/quant.sqlite --strategy strong_stock_screen --lookback-bars 250 --liquidity-profile aggressive --liquidity-mode intersect --top 20
 python -m quant_system portfolio allocate --csv data/sample_ohlcv.csv --strategy strong_stock_screen --cash 100000 --top 5
 python -m quant_system portfolio precheck --csv data/sample_ohlcv.csv --strategy strong_stock_screen --symbol 000001 --entry-price 38 --planned-pct 0.10 --stop-price 35 --target-price 44
 python -m quant_system portfolio approve --csv data/sample_ohlcv.csv --strategy strong_stock_screen --symbol 000001 --current-price 38 --planned-pct 0.10 --stop-price 35 --target-price 44 --record
